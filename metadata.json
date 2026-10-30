@@ -1,0 +1,6 @@
+{
+  "name": "Kami-no-Yaiba: Sumi-e Samurai ARPG",
+  "description": "A 3D Top-Down/Isometric Samurai Action-RPG combining Ukiyo-e woodblock prints, Sumi-e ink wash painting, and Washi paper craft with a 19-item procedural arsenal, 5-stage campaign, and adaptive utility AI.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
