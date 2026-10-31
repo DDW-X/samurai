@@ -13,7 +13,6 @@ import {
   TWENTY_AUTHENTIC_ARSENAL,
   ArtworkThemeId,
 } from './game/arsenal';
-import { CAMPAIGN_STAGES } from './game/stages';
 import { downloadStandaloneSamuraiHTML } from './game/singleFileExporter';
 import {
   ARTWORK_THEMES,
@@ -30,6 +29,22 @@ import {
   ELEMENTAL_INFUSIONS,
   DEFAULT_CHARACTER_APPEARANCE,
 } from './game/characterCustomization';
+import {
+  VERIFIED_3D_ASSET_PRESETS,
+  AssetTargetSlot,
+  InspectedModelTelemetry,
+} from './game/assetManager';
+import { SIX_COMBAT_MOVES, CombatMoveDefinition } from './game/combatSplinesAndShaders';
+import { NANO_BANANA_PBR_PRESETS, NanoBananaPresetId } from './game/pbrTextureForge';
+import { DOJO_CURRICULUM_LESSONS, DojoLessonId } from './game/comboDojoTrainer';
+import { onAuthStateChanged, User } from 'firebase/auth';
+import {
+  auth,
+  signInSamuraiWithGoogle,
+  signOutSamurai,
+  syncSamuraiProfileToCloud,
+  subscribeToSamuraiProfile,
+} from './lib/firebase';
 
 interface TacticianResponse {
   source: string;
@@ -41,6 +56,7 @@ interface TacticianResponse {
 export default function App() {
   const canvasMountRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<SamuraiEngine | null>(null);
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
 
   const [hud, setHud] = useState<HUDStateSnapshot | null>(null);
   const [arsenalOpen, setArsenalOpen] = useState(false);
@@ -68,26 +84,93 @@ export default function App() {
     'Active: Procedural Web Audio Pentatonic Koto, Shakuhachi & Taiko Engine'
   );
 
+  // Live 3D Asset Inspector & URL/File Dropper State ([L] Hotkey)
+  const [assetStudioOpen, setAssetStudioOpen] = useState(false);
+  const [assetTargetSlot, setAssetTargetSlot] = useState<AssetTargetSlot>('samurai');
+  const [customAssetUrlInput, setCustomAssetUrlInput] = useState('');
+  const [assetLoadingStatus, setAssetLoadingStatus] = useState<string>(
+    'GLTFLoader + DRACOLoader + RGBELoader & High-Order Mathematical Forge Ready'
+  );
+  const [inspectedTelemetry, setInspectedTelemetry] = useState<InspectedModelTelemetry | null>(
+    null
+  );
+
+  // Cloud Profile Sync State (Firebase Auth + Firestore)
+  const [cloudUser, setCloudUser] = useState<User | null>(null);
+  const [cloudSyncNotice, setCloudSyncNotice] = useState<string>('');
+
+  // Nano Banana Pro (gemini-3-pro-image-preview) 4-Map PBR & POM Forge State
+  const [pbrPresetId, setPbrPresetId] = useState<NanoBananaPresetId>(NANO_BANANA_PBR_PRESETS[0].id);
+  const [pbrCustomPrompt, setPbrCustomPrompt] = useState<string>('');
+  const [pbrSynthesizing, setPbrSynthesizing] = useState<boolean>(false);
+
   useEffect(() => {
     const portraits = generateAllStudioArtworkPortraits('sumi_blood_ink');
     setArtworkMap(portraits);
   }, []);
 
   useEffect(() => {
+    let unsubProfile: (() => void) | null = null;
+    const unsubAuth = onAuthStateChanged(auth, (user) => {
+      setCloudUser(user);
+      if (unsubProfile) {
+        unsubProfile();
+        unsubProfile = null;
+      }
+      if (user) {
+        unsubProfile = subscribeToSamuraiProfile(user, (data) => {
+          if (data && engineRef.current) {
+            if (typeof data.primaryWeaponId === 'string') {
+              engineRef.current.equipWeapon(data.primaryWeaponId);
+            }
+            if (typeof data.armorId === 'string') {
+              engineRef.current.equipArmor(data.armorId);
+            }
+            if (typeof data.helmetId === 'string') {
+              engineRef.current.equipHelmet(data.helmetId);
+            }
+            setCloudSyncNotice('Cloud Samurai Profile synchronized.');
+          }
+        });
+      }
+    });
+    return () => {
+      unsubAuth();
+      if (unsubProfile) unsubProfile();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!canvasMountRef.current) return;
     const engine = new SamuraiEngine(canvasMountRef.current, (snapshot) => {
       setHud(snapshot);
+      if (snapshot.inspectedTelemetry) {
+        setInspectedTelemetry(snapshot.inspectedTelemetry);
+      }
     });
     engineRef.current = engine;
+    engine.inspectTargetSlotTelemetry('samurai');
 
     const onGlobalKey = (e: KeyboardEvent) => {
       if (e.code === 'Tab' || e.code === 'KeyI') {
         e.preventDefault();
         setArsenalOpen((prev) => !prev);
         setShogunPanelOpen(false);
+        setAssetStudioOpen(false);
       } else if (e.code === 'KeyN') {
         setShogunPanelOpen((prev) => !prev);
         setArsenalOpen(false);
+        setAssetStudioOpen(false);
+      } else if (e.code === 'KeyL') {
+        setAssetStudioOpen((prev) => {
+          const next = !prev;
+          if (next && engineRef.current) {
+            engineRef.current.inspectTargetSlotTelemetry('samurai');
+          }
+          return next;
+        });
+        setArsenalOpen(false);
+        setShogunPanelOpen(false);
       } else if (e.code === 'KeyH') {
         setDockCollapsed((prev) => !prev);
       } else if (e.code === 'KeyM') {
@@ -104,6 +187,84 @@ export default function App() {
       engineRef.current = null;
     };
   }, []);
+
+  const handleRefreshTelemetry = (slot: AssetTargetSlot) => {
+    setAssetTargetSlot(slot);
+    if (engineRef.current) {
+      engineRef.current.inspectTargetSlotTelemetry(slot);
+    }
+  };
+
+  const handleLoadUrlForSlot = async (slot: AssetTargetSlot, url: string, label?: string) => {
+    if (!engineRef.current || !url.trim()) return;
+    setAssetLoadingStatus(`Loading ${label || url} into [${slot.toUpperCase()}]...`);
+    try {
+      const report = await engineRef.current.loadCustomGLTFUrlForSlot(url.trim(), slot, label);
+      setInspectedTelemetry(report);
+      setAssetLoadingStatus(
+        `Hot-swapped [${slot.toUpperCase()}]: ${report.name} (${report.vertexCount.toLocaleString()} verts · ${report.triangleCount.toLocaleString()} tris)`
+      );
+    } catch {
+      setAssetLoadingStatus(
+        `CORS/Network fallback triggered for ${label || url} — Parametric Mathematical Surface active.`
+      );
+    }
+  };
+
+  const handleDropOrSelectFile = async (file: File) => {
+    if (!engineRef.current) return;
+    const isHdr = file.name.toLowerCase().endsWith('.hdr');
+    const targetSlot: AssetTargetSlot = isHdr ? 'hdri' : assetTargetSlot;
+    setAssetLoadingStatus(`Parsing local 3D file "${file.name}" into [${targetSlot.toUpperCase()}]...`);
+    try {
+      const report = await engineRef.current.loadDroppedGLTFFileForSlot(file, targetSlot);
+      setAssetTargetSlot(targetSlot);
+      setInspectedTelemetry(report);
+      setAssetLoadingStatus(
+        `Loaded local file "${file.name}" into [${targetSlot.toUpperCase()}] (${report.vertexCount.toLocaleString()} verts · ${report.triangleCount.toLocaleString()} tris)`
+      );
+    } catch {
+      setAssetLoadingStatus(`Could not parse "${file.name}". Ensure it is a valid .glb, .gltf, or .hdr file.`);
+    }
+  };
+
+  const handleSynthesizeNanoBananaPBR = async (presetId: NanoBananaPresetId, customPrompt?: string) => {
+    if (!engineRef.current || pbrSynthesizing) return;
+    setPbrSynthesizing(true);
+    setAssetLoadingStatus(`Synthesizing 4-Map Sobel-Scharr PBR + 16-Step POM Material (${presetId})...`);
+    try {
+      const bundle = await engineRef.current.generateAndApplyNanoBananaPBR(presetId, customPrompt);
+      setAssetLoadingStatus(
+        `Applied 4-Map PBR + POM Material: ${bundle.presetId} via ${bundle.sourceModel} (16-step Raymarched Relief)`
+      );
+    } finally {
+      setPbrSynthesizing(false);
+    }
+  };
+
+  const handleCloudSaveProfile = async () => {
+    if (!hud) return;
+    try {
+      let activeUser = cloudUser;
+      if (!activeUser) {
+        activeUser = await signInSamuraiWithGoogle();
+      }
+      if (!activeUser) return;
+      await syncSamuraiProfileToCloud(activeUser, {
+        bestScore: hud.bestScore,
+        koku: hud.koku,
+        highestUnlockedStage: hud.highestUnlockedStage,
+        primaryWeaponId: hud.primaryWeapon.id,
+        secondaryWeaponId: hud.secondaryWeapon.id,
+        rangedWeaponId: hud.rangedWeapon.id,
+        armorId: hud.equippedArmor.id,
+        helmetId: hud.equippedHelmet.id,
+      });
+      setCloudSyncNotice('Saved Samurai profile & loadout to Cloud.');
+    } catch {
+      setCloudSyncNotice('Cloud sign-in or sync cancelled.');
+    }
+  };
 
   const handleSelectArtTheme = (nextTheme: ArtworkThemeId) => {
     setArtTheme(nextTheme);
@@ -372,36 +533,33 @@ export default function App() {
             </div>
 
             <p className="text-sm md:text-base text-[#e2d5c1] leading-relaxed mb-4 max-w-md">
-              Master 35 parametric Tamahagane &amp; siege weapons across 10 infinite-looping
-              Washi-paper biomes. Sculpt your Samurai&apos;s Subsurface Scattering anatomy,
-              unleash 5 Elemental Infusions, and grapple across Torii spirit portals.
+              Explore a seamless, infinite 360° Japanese archipelago streamed across an active
+              5×5 CDLOD chunk grid (80m × 80m chunks). Master 35 unified single-edged{' '}
+              <em>Shinogi-Zukuri</em> Tamahagane blades with two-handed <em>Morote</em> Inverse
+              Kinematics and switch cameras anytime with <strong className="text-[#fbbf24]">[V]</strong>.
             </p>
 
-            {/* 10-Biome Campaign & Infinite World Selector Strip */}
-            <div className="mb-5">
-              <p className="text-xs text-[#d6c7b2] mb-2">
-                Select Biome Province ({hud.stageIndex + 1}/10: {hud.stageDef.name} ·{' '}
-                {hud.stageDef.kanji})
-              </p>
-              <div className="flex flex-wrap gap-1.5">
-                {CAMPAIGN_STAGES.map((st, idx) => (
-                  <button
-                    key={st.id}
-                    type="button"
-                    onClick={(e) => {
-                      e.currentTarget.blur();
-                      engineRef.current?.selectStage(idx);
-                    }}
-                    className={`px-2.5 py-1 text-xs font-medium rounded transition-colors whitespace-nowrap shrink-0 cursor-pointer ${
-                      hud.stageIndex === idx
-                        ? 'bg-[#991b1b] text-[#f3ebd9] border border-[#fbbf24]'
-                        : 'bg-[#1f1915] text-[#c7b79e] border border-[#3d322a] hover:text-[#f3ebd9]'
-                    }`}
-                  >
-                    {idx + 1}. {st.name.split(' ')[0]}
-                  </button>
-                ))}
+            {/* Infinite 5x5 Chunk World & 3-Mode Camera Perspective Status Bar */}
+            <div className="mb-5 p-3 rounded bg-[#18130f]/90 border border-[#4a3b31] flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <div className="text-[11px] font-bold text-[#fbbf24] tracking-wider">
+                  無境開放世界 · SEAMLESS 5×5 CHUNK OPEN WORLD ({hud.openWorldTelemetry.activeChunkCount} ACTIVE CHUNKS)
+                </div>
+                <div className="text-xs text-[#d6c7b2] font-mono-num">
+                  Region: {hud.openWorldTelemetry.currentBiome.name} ({hud.openWorldTelemetry.currentBiome.kanji}) · Camera: {hud.cameraModeLabel}
+                </div>
               </div>
+              <button
+                type="button"
+                data-camera-toggle="true"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  engineRef.current?.cycleCameraMode();
+                }}
+                className="px-3 py-1.5 text-xs font-semibold bg-[#292018] hover:bg-[#3a2d22] text-[#fbbf24] border border-[#fbbf24]/80 rounded cursor-pointer whitespace-nowrap"
+              >
+                [V] Switch CameraMode
+              </button>
             </div>
 
             {/* Primary CTA + Dojo Training Mode + 3D Face Customizer + 35-Weapon Armory */}
@@ -415,7 +573,7 @@ export default function App() {
                 }}
                 className="px-5 py-3 text-sm font-bold tracking-wider text-[#f3ebd9] bg-[#991b1b] hover:bg-[#b91c1c] border border-[#fbbf24] rounded transition-transform active:scale-95 cursor-pointer whitespace-nowrap shrink-0"
               >
-                Enter Battle [Enter / Space]
+                Enter Open World [Enter / Space]
               </button>
 
               <button
@@ -455,6 +613,19 @@ export default function App() {
 
               <button
                 type="button"
+                data-asset-inspector="true"
+                onClick={(e) => {
+                  e.currentTarget.blur();
+                  handleRefreshTelemetry(assetTargetSlot);
+                  setAssetStudioOpen(true);
+                }}
+                className="px-4 py-3 text-sm font-semibold text-[#a7f3d0] bg-[#14261f] hover:bg-[#1b352b] border border-[#34d399]/70 rounded transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                3D Asset Dropper &amp; Inspector [L]
+              </button>
+
+              <button
+                type="button"
                 onClick={(e) => {
                   e.currentTarget.blur();
                   downloadStandaloneSamuraiHTML();
@@ -468,7 +639,7 @@ export default function App() {
 
           {/* Single Flat Borderless Control-Hint Line in Bottom Safe Margin */}
           <div className="text-xs text-[#d6c7b2] tracking-wide">
-            WASD Move · Shift Dodge/Roll/Mikiri · Alt Utsusemi Decoy · Space Jump/Wall-Vault · G Kaginawa Grapple · Z/X/C/V/B Elemental Infusions · K 3D Face Studio · Tab Armory (35)
+            WASD Move · [V] 3-Mode Camera (3rd-Person RPG / 1st-Person FPV / Isometric) · LMB 6-Move Combo · RMB Sekiro Deflect · L 3D Asset Dropper · K 3D Face Studio · Tab Armory (35)
           </div>
         </main>
       )}
@@ -533,26 +704,42 @@ export default function App() {
                 />
               </div>
 
-              {/* 7-Mode Dodge, Kaginawa Grapple & Destructible Armor Readout */}
+              {/* 6-Move Combat System & Multi-Physics Readout */}
               <div className="flex items-center justify-between text-[10px] text-[#c7b79e] font-mono-num pt-1 border-t border-[#3d322a]">
                 <span>
                   Tech: <strong className="text-[#fbbf24]">{hud.lastDodgeMode.toUpperCase()}</strong>
                   {hud.chronosTimer > 0 ? ` · CHRONOS ${hud.chronosTimer}s` : ''}
                 </span>
-                <span>Armor {hud.armorIntegrity}%</span>
+                <span>Armor {hud.armorIntegrity}% · Bisect {hud.lastBisectedTriCount}△</span>
+              </div>
+              <div className="mt-1 pt-1 border-t border-[#3d322a]/70 flex items-center justify-between text-[10px] font-mono-num">
+                <span className="text-[#fca5a5] truncate">
+                  {hud.activeCombatMoveDef.name} ({hud.activeCombatMoveDef.kanji})
+                </span>
+                <span className="text-[#34d399] shrink-0 ml-1">
+                  8-Ray · {hud.cannonRigidBodyCount} Bodies
+                </span>
+              </div>
+              <div className="mt-1 pt-1 border-t border-[#3d322a]/70 flex items-center justify-between text-[10px] font-mono-num text-[#a7f3d0]">
+                <span className="truncate">
+                  CDLOD {hud.openWorldTelemetry.activeChunkCount} Chunks · {hud.openWorldTelemetry.currentBiome.kanji}
+                </span>
+                <span className="text-[#38bdf8] shrink-0 ml-1">
+                  POM {hud.activePbrBundle?.pomSteps ?? 16}st
+                </span>
               </div>
             </div>
 
             {/* Top-Center: Compact Biome Banner & Boss Health Bar */}
-            <div className="flex flex-col items-center max-w-lg w-full">
-              <div className="sumi-bar-frame px-3.5 py-1 rounded text-center mb-1.5 flex items-center justify-center gap-2.5">
-                <div>
-                  <p className="text-xs font-semibold text-[#fbbf24] tracking-wide">
+            <div className="flex flex-col items-center max-w-xl w-full">
+              <div className="sumi-bar-frame px-3.5 py-1.5 rounded text-center mb-1.5 flex flex-wrap items-center justify-center gap-x-3 gap-y-1">
+                <div className="whitespace-nowrap">
+                  <p className="text-xs font-semibold text-[#fbbf24] tracking-wide whitespace-nowrap">
                     {hud.isDojoMode
                       ? 'Dojo Training Mode · 稽古道場'
-                      : `Biome ${hud.stageIndex + 1}/10: ${hud.stageDef.name} · ${hud.stageDef.kanji}`}
+                      : `${hud.openWorldTelemetry.currentBiome.name} · ${hud.openWorldTelemetry.currentBiome.kanji} (${hud.openWorldTelemetry.activeChunkCount} Chunks)`}
                   </p>
-                  <p className="text-[10px] text-[#d6c7b2] font-mono-num">
+                  <p className="text-[10px] text-[#d6c7b2] font-mono-num whitespace-nowrap">
                     {hud.isDojoMode
                       ? `Score ${hud.score} · Combo ${hud.comboCount}x · Honor ${hud.koku} 石`
                       : `Score ${hud.score} · Combo ${hud.comboCount}x · Honor ${hud.koku} 石 · Foes ${hud.enemiesRemaining}`}
@@ -574,6 +761,18 @@ export default function App() {
                 <button
                   type="button"
                   data-ui-interactive="true"
+                  data-camera-hud-toggle="true"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    engineRef.current?.cycleCameraMode();
+                  }}
+                  className="pointer-events-auto px-2 py-0.5 text-[10px] font-semibold bg-[#17222b] hover:bg-[#1e2f3d] text-[#38bdf8] border border-[#38bdf8]/70 rounded cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  [V] {hud.cameraModeLabel}
+                </button>
+                <button
+                  type="button"
+                  data-ui-interactive="true"
                   onClick={(e) => {
                     e.currentTarget.blur();
                     engineRef.current?.triggerKaginawaGrapple();
@@ -581,6 +780,22 @@ export default function App() {
                   className="pointer-events-auto px-2 py-0.5 text-[10px] font-semibold bg-[#292018] hover:bg-[#3a2d22] text-[#fbbf24] border border-[#fbbf24]/60 rounded cursor-pointer whitespace-nowrap shrink-0"
                 >
                   [G] 鉤縄 Grapple
+                </button>
+                <button
+                  type="button"
+                  data-ui-interactive="true"
+                  data-dojo-trainer-toggle="true"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    engineRef.current?.toggleDojoOverlay();
+                  }}
+                  className={`pointer-events-auto px-2 py-0.5 text-[10px] font-semibold border rounded cursor-pointer whitespace-nowrap shrink-0 ${
+                    hud.dojoSnapshot.trainerOpen
+                      ? 'bg-[#991b1b] text-[#fef3c7] border-[#fbbf24]'
+                      : 'bg-[#1a241e] hover:bg-[#233229] text-[#a7f3d0] border-[#34d399]/60'
+                  }`}
+                >
+                  [T] 稽古 Combo Dojo ({hud.dojoSnapshot.unlockedScrolls.length}/7)
                 </button>
                 {hud.isDojoMode && (
                   <button
@@ -596,6 +811,21 @@ export default function App() {
                   </button>
                 )}
               </div>
+
+              {/* Bilingual Japanese Voice & Battle Callout Subtitle Banner */}
+              {hud.activeDialogueSubtitle && (
+                <div className="sumi-bar-frame px-3.5 py-1.5 rounded w-full border-[#fbbf24]/70 mb-1.5 text-center">
+                  <div className="text-[10px] text-[#fbbf24] font-semibold tracking-wider">
+                    {hud.activeDialogueSubtitle.speaker} · {hud.activeDialogueSubtitle.japaneseKanji}
+                  </div>
+                  <div className="text-xs font-bold text-[#f3ebd9]">
+                    “{hud.activeDialogueSubtitle.romaji}”
+                  </div>
+                  <div className="text-[11px] text-[#c7b79e] italic">
+                    {hud.activeDialogueSubtitle.english}
+                  </div>
+                </div>
+              )}
 
               {hud.bossActive && (
                 <div className="sumi-bar-frame px-3.5 py-1.5 rounded w-full border-[#dc2626] flex items-center gap-2.5">
@@ -645,6 +875,22 @@ export default function App() {
                 <button
                   type="button"
                   tabIndex={-1}
+                  data-asset-inspector="true"
+                  aria-label="Open Live 3D Asset Inspector and Dropper"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    handleRefreshTelemetry(assetTargetSlot);
+                    setAssetStudioOpen((p) => !p);
+                    setArsenalOpen(false);
+                    setShogunPanelOpen(false);
+                  }}
+                  className="px-2.5 py-2 sumi-bar-frame rounded text-xs font-medium text-[#34d399] hover:border-[#34d399] cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  3D Assets [L]
+                </button>
+                <button
+                  type="button"
+                  tabIndex={-1}
                   onClick={(e) => {
                     e.currentTarget.blur();
                     engineRef.current?.setCustomizerMode(true);
@@ -661,6 +907,7 @@ export default function App() {
                     e.currentTarget.blur();
                     setArsenalOpen((p) => !p);
                     setShogunPanelOpen(false);
+                    setAssetStudioOpen(false);
                   }}
                   className="px-2.5 py-2 sumi-bar-frame rounded text-xs font-medium text-[#f3ebd9] hover:border-[#fbbf24] cursor-pointer whitespace-nowrap shrink-0"
                 >
@@ -674,6 +921,7 @@ export default function App() {
                     e.currentTarget.blur();
                     setShogunPanelOpen((p) => !p);
                     setArsenalOpen(false);
+                    setAssetStudioOpen(false);
                   }}
                   className="px-2.5 py-2 sumi-bar-frame rounded text-xs font-medium text-[#fbbf24] hover:border-[#fbbf24] cursor-pointer whitespace-nowrap shrink-0"
                 >
@@ -736,9 +984,144 @@ export default function App() {
                     {Math.round(hud.aiSnapshot.dodgePredictProb * 100)}%)
                   </div>
                 </div>
+                <div className="mt-1.5 pt-1 border-t border-[#3d322a] text-[10px] font-mono-num text-[#a7f3d0] truncate">
+                  T_player = [
+                  {[
+                    hud.aiSnapshot.meleeSpamRate,
+                    hud.aiSnapshot.rangedDependency,
+                    hud.aiSnapshot.dodgePredictProb,
+                    hud.aiSnapshot.parryTimingAccuracy,
+                    hud.aiSnapshot.jumpFrequency,
+                  ]
+                    .map((v: number) => v.toFixed(2))
+                    .join(', ')}
+                  ]
+                </div>
               </div>
             </div>
           </div>
+
+          {/* ====================================================================
+              INTERACTIVE COMBO DOJO & HOLOGRAPHIC GHOST MASTER TRAINER ([T] Key)
+              ==================================================================== */}
+          {hud.dojoSnapshot.trainerOpen && (
+            <aside
+              aria-label="Interactive Combo Dojo and Martial Arts Trainer"
+              data-ui-interactive="true"
+              className="pointer-events-auto self-start sumi-bar-frame rounded p-3.5 w-80 md:w-96 text-xs text-[#f3ebd9] border border-[#fbbf24]/70 my-1"
+            >
+              <div className="flex items-center justify-between border-b border-[#3d322a] pb-2 mb-2">
+                <div>
+                  <div className="text-[10px] font-bold tracking-wider text-[#fbbf24]">
+                    稽古道場 · HOLOGRAPHIC GHOST MASTER DOJO
+                  </div>
+                  <div className="text-xs font-bold font-display">
+                    Step-by-Step 7-Move Curriculum ({hud.dojoSnapshot.unlockedScrolls.length}/7 Mastered)
+                  </div>
+                </div>
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => engineRef.current?.toggleGhostSlowMotion()}
+                    className="px-2 py-0.5 text-[10px] bg-[#241d18] hover:bg-[#332922] border border-[#fbbf24]/60 text-[#fbbf24] rounded cursor-pointer"
+                  >
+                    Ghost {hud.dojoSnapshot.ghostMasterSlowMoSpeed}×
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => engineRef.current?.toggleDojoOverlay(false)}
+                    className="px-2 py-0.5 text-[10px] bg-[#991b1b] text-[#f3ebd9] rounded cursor-pointer"
+                  >
+                    ✕
+                  </button>
+                </div>
+              </div>
+
+              {/* Active Lesson Prompt & Key Sequence */}
+              <div className="p-2 rounded bg-[#14100d] border border-[#3d322a] mb-2">
+                <div className="flex items-center justify-between mb-1">
+                  <span className="font-bold text-[#fbbf24]">
+                    Lesson {hud.dojoSnapshot.activeLesson.stepNumber}:{' '}
+                    {hud.dojoSnapshot.activeLesson.name} ({hud.dojoSnapshot.activeLesson.kanji})
+                  </span>
+                  <span className="font-mono-num text-[11px] text-[#34d399]">
+                    {hud.dojoSnapshot.lessonProgress[hud.dojoSnapshot.activeLesson.id]?.repsCompleted ?? 0}/
+                    {hud.dojoSnapshot.activeLesson.requiredReps} [✓]
+                  </span>
+                </div>
+                <div className="flex flex-wrap items-center gap-1 mb-1">
+                  {hud.dojoSnapshot.activeLesson.keySequencePrompts.map((badge: string, bIdx: number) => (
+                    <span
+                      key={bIdx}
+                      className="px-1.5 py-0.5 text-[10px] font-mono-num font-bold bg-[#292018] text-[#fef3c7] border border-[#fbbf24]/60 rounded"
+                    >
+                      {badge}
+                    </span>
+                  ))}
+                  <span className="text-[10px] text-[#38bdf8] ml-auto font-mono-num">
+                    DPS: {hud.dojoSnapshot.liveDps}
+                  </span>
+                </div>
+                <p className="text-[11px] text-[#c7b79e] leading-snug">
+                  {hud.dojoSnapshot.activeLesson.timingHint}
+                </p>
+              </div>
+
+              {/* Visual Rhythm & Frame-Window Timing Bar */}
+              <div className="mb-2">
+                <div className="flex items-center justify-between text-[10px] font-mono-num mb-1">
+                  <span className="text-[#d6c7b2]">
+                    FRAME TIMING BAR: <strong className="text-[#fbbf24]">{hud.dojoSnapshot.currentPhase.toUpperCase()}</strong>
+                  </span>
+                  <span className="text-[#a7f3d0] truncate max-w-[160px]">
+                    {hud.dojoSnapshot.lastTimingGrade}
+                  </span>
+                </div>
+                <div className="w-full h-3 bg-[#0e0b09] border border-[#4a3b31] rounded overflow-hidden relative flex">
+                  <div className="h-full bg-[#ef4444]/60" style={{ width: '25%' }} title="Startup Windup" />
+                  <div className="h-full bg-[#f59e0b]/80" style={{ width: '37%' }} title="Active Blade Hit" />
+                  <div className="h-full bg-[#10b981]/90" style={{ width: '20%' }} title="Golden Cancel Window" />
+                  <div className="h-full bg-[#3b82f6]/50" style={{ width: '18%' }} title="Recovery" />
+                  <div
+                    className="absolute inset-y-0 w-1.5 bg-white shadow"
+                    style={{
+                      left: `${Math.min(98, Math.round(hud.dojoSnapshot.frameCursorNormalized * 100))}%`,
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* 7-Lesson Selector Strip with Completion Checkmarks */}
+              <div className="grid grid-cols-2 gap-1 max-h-28 overflow-y-auto pr-0.5">
+                {DOJO_CURRICULUM_LESSONS.map((lesson, idx) => {
+                  const prog = hud.dojoSnapshot.lessonProgress[lesson.id as DojoLessonId];
+                  const isCurrent = hud.dojoSnapshot.activeLessonIndex === idx;
+                  return (
+                    <button
+                      key={lesson.id}
+                      type="button"
+                      onClick={() => engineRef.current?.selectDojoLesson(idx)}
+                      className={`px-2 py-1 rounded text-left text-[10px] border flex items-center justify-between cursor-pointer ${
+                        isCurrent
+                          ? 'bg-[#991b1b]/85 border-[#fbbf24] text-[#fef3c7]'
+                          : prog?.mastered
+                            ? 'bg-[#14261f] border-[#34d399]/60 text-[#a7f3d0]'
+                            : 'bg-[#181310] border-[#3d322a] text-[#c7b79e]'
+                      }`}
+                    >
+                      <span className="truncate">
+                        {prog?.mastered ? '[✓] ' : `${lesson.stepNumber}. `}
+                        {lesson.name}
+                      </span>
+                      <span className="font-mono-num ml-1 shrink-0">
+                        {prog?.repsCompleted ?? 0}/{lesson.requiredReps}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
+            </aside>
+          )}
 
           {/* BOTTOM COLLAPSIBLE WEAPON, NINJUTSU & 5 ELEMENTAL INFUSIONS DOCK */}
           <div className="self-center flex flex-col items-center pointer-events-auto" data-ui-interactive="true">
@@ -1965,6 +2348,363 @@ export default function App() {
             </div>
           </dialog>
         )}
+
+      {/* ====================================================================
+          LIVE 3D ASSET INSPECTOR & URL/FILE DROPPER STUDIO ([L] Key / Button)
+          ==================================================================== */}
+      {assetStudioOpen && hud && (
+        <dialog
+          open
+          aria-label="Live 3D Asset Inspector and GLTF HDRI Dropper Studio"
+          className="fixed inset-0 z-50 w-full h-full bg-black/80 flex items-center justify-center p-4"
+          data-ui-interactive="true"
+        >
+          <div className="washi-card rounded-lg max-w-4xl w-full max-h-[90vh] flex flex-col overflow-hidden text-[#f3ebd9] border border-[#34d399]/70">
+            <div className="px-6 py-4 border-b border-[#3d322a] flex items-center justify-between">
+              <div>
+                <p className="text-[10px] tracking-[0.2em] text-[#34d399]">
+                  THREE.JS GLTFLOADER + DRACOLOADER + RGBELOADER &amp; PARAMETRIC FORGE
+                </p>
+                <h2 className="text-xl font-bold font-display">
+                  Live 3D Asset Inspector &amp; URL / File Dropper Studio
+                </h2>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={handleCloudSaveProfile}
+                  className="px-3 py-1.5 text-xs font-semibold bg-[#172554] hover:bg-[#1e3a8a] border border-[#38bdf8] text-[#e0f2fe] rounded cursor-pointer"
+                >
+                  {cloudUser ? `Sync Cloud (${cloudUser.displayName?.split(' ')[0] || 'Saved'})` : 'Sign In & Cloud Sync'}
+                </button>
+                {cloudUser && (
+                  <button
+                    type="button"
+                    onClick={() => signOutSamurai()}
+                    className="px-2.5 py-1.5 text-xs bg-[#241d18] border border-[#4a3b31] text-[#c7b79e] rounded cursor-pointer"
+                  >
+                    Sign Out
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={() => setAssetStudioOpen(false)}
+                  className="px-3.5 py-1.5 text-xs font-bold bg-[#991b1b] hover:bg-[#b91c1c] border border-[#fbbf24] rounded cursor-pointer"
+                >
+                  Close [L / Esc]
+                </button>
+              </div>
+            </div>
+
+            <div className="p-6 overflow-y-auto space-y-5">
+              {/* Status Banner */}
+              <div className="px-3.5 py-2 rounded bg-[#121c17] border border-[#34d399]/50 flex flex-wrap items-center justify-between gap-2 text-xs">
+                <span className="text-[#a7f3d0] font-mono-num">{assetLoadingStatus}</span>
+                {cloudSyncNotice && (
+                  <span className="text-[#38bdf8] font-semibold">{cloudSyncNotice}</span>
+                )}
+              </div>
+
+              {/* Target Slot Selector + Live Telemetry Readout */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-4 rounded bg-[#14100d] border border-[#3d322a] space-y-3">
+                  <div className="text-xs font-bold text-[#fbbf24]">
+                    1. Select Target 3D Hot-Swap Slot
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    {(
+                      [
+                        ['samurai', 'Samurai Rig (.glb / .gltf)'],
+                        ['weapon', 'Primary Weapon (.glb / .gltf)'],
+                        ['boss', 'Active Enemy / Boss (.glb)'],
+                        ['hdri', 'Poly Haven Environment (.hdr)'],
+                      ] as const
+                    ).map(([slotKey, label]) => (
+                      <button
+                        key={slotKey}
+                        type="button"
+                        onClick={() => handleRefreshTelemetry(slotKey)}
+                        className={`p-2.5 rounded text-xs font-semibold text-left border cursor-pointer ${
+                          assetTargetSlot === slotKey
+                            ? 'bg-[#14261f] border-[#34d399] text-[#a7f3d0]'
+                            : 'bg-[#1c1612] border-[#3d322a] text-[#c7b79e] hover:text-[#f3ebd9]'
+                        }`}
+                      >
+                        {label}
+                      </button>
+                    ))}
+                  </div>
+
+                  {/* Drag & Drop Local File Zone */}
+                  <div
+                    onDragOver={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                    }}
+                    onDrop={(e) => {
+                      e.preventDefault();
+                      e.stopPropagation();
+                      const file = e.dataTransfer?.files?.[0];
+                      if (file) {
+                        void handleDropOrSelectFile(file);
+                      }
+                    }}
+                    onClick={() => fileInputRef.current?.click()}
+                    className="p-4 rounded border-2 border-dashed border-[#34d399]/60 hover:border-[#fbbf24] bg-[#171310] text-center cursor-pointer transition-colors"
+                  >
+                    <input
+                      ref={fileInputRef}
+                      type="file"
+                      accept=".glb,.gltf,.hdr"
+                      className="hidden"
+                      onChange={(e) => {
+                        const file = e.target.files?.[0];
+                        if (file) {
+                          void handleDropOrSelectFile(file);
+                        }
+                      }}
+                    />
+                    <p className="text-xs font-bold text-[#a7f3d0]">
+                      Drag &amp; Drop any local .glb, .gltf, or .hdr file here
+                    </p>
+                    <p className="text-[11px] text-[#c7b79e] mt-0.5">
+                      Or click to browse from your computer to hot-swap [{assetTargetSlot.toUpperCase()}] in real time
+                    </p>
+                  </div>
+
+                  {/* Paste Custom CORS URL */}
+                  <div className="flex gap-2">
+                    <input
+                      type="url"
+                      value={customAssetUrlInput}
+                      onChange={(e) => setCustomAssetUrlInput(e.target.value)}
+                      placeholder="https://raw.githubusercontent.com/.../model.glb or .hdr"
+                      className="flex-1 bg-[#1c1612] border border-[#4a3b31] rounded px-3 py-1.5 text-xs text-[#f3ebd9]"
+                    />
+                    <button
+                      type="button"
+                      onClick={() =>
+                        void handleLoadUrlForSlot(
+                          assetTargetSlot,
+                          customAssetUrlInput,
+                          'Custom Remote Asset'
+                        )
+                      }
+                      className="px-3.5 py-1.5 text-xs font-bold bg-[#991b1b] hover:bg-[#b91c1c] border border-[#fbbf24] rounded cursor-pointer whitespace-nowrap"
+                    >
+                      Hot-Swap URL
+                    </button>
+                  </div>
+                </div>
+
+                {/* Live 3D Mesh & Multi-Physics Telemetry Panel */}
+                <div className="p-4 rounded bg-[#14100d] border border-[#3d322a] flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center justify-between border-b border-[#3d322a] pb-1.5 mb-2.5">
+                      <span className="text-xs font-bold text-[#34d399]">
+                        2. Live 3D Mesh &amp; Physics Telemetry [{assetTargetSlot.toUpperCase()}]
+                      </span>
+                      <span className="text-[11px] font-mono-num text-[#fbbf24]">
+                        {inspectedTelemetry?.sourceUrlOrFile || 'procedural://mathematical-samurai-rig'}
+                      </span>
+                    </div>
+
+                    {inspectedTelemetry && (
+                      <div className="grid grid-cols-2 gap-2 text-xs font-mono-num">
+                        <div className="p-2 rounded bg-[#1c1612] border border-[#2e241d]">
+                          <div className="text-[10px] text-[#c7b79e]">ACTIVE ASSET</div>
+                          <div className="font-bold text-[#f3ebd9] truncate">
+                            {inspectedTelemetry.name}
+                          </div>
+                        </div>
+                        <div className="p-2 rounded bg-[#1c1612] border border-[#2e241d]">
+                          <div className="text-[10px] text-[#c7b79e]">VERTICES / TRIANGLES</div>
+                          <div className="font-bold text-[#a7f3d0]">
+                            {inspectedTelemetry.vertexCount.toLocaleString()} /{' '}
+                            {inspectedTelemetry.triangleCount.toLocaleString()}
+                          </div>
+                        </div>
+                        <div className="p-2 rounded bg-[#1c1612] border border-[#2e241d]">
+                          <div className="text-[10px] text-[#c7b79e]">SKINNED MESHES / BONES</div>
+                          <div className="font-bold text-[#38bdf8]">
+                            {inspectedTelemetry.skinnedMeshCount} / {inspectedTelemetry.boneCount} Bones
+                          </div>
+                        </div>
+                        <div className="p-2 rounded bg-[#1c1612] border border-[#2e241d]">
+                          <div className="text-[10px] text-[#c7b79e]">BOUNDING BOX (M)</div>
+                          <div className="font-bold text-[#fbbf24]">
+                            {inspectedTelemetry.boundingBoxMeters.x} ×{' '}
+                            {inspectedTelemetry.boundingBoxMeters.y} ×{' '}
+                            {inspectedTelemetry.boundingBoxMeters.z}m
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="mt-3 pt-2.5 border-t border-[#3d322a] grid grid-cols-3 gap-2 text-[11px] font-mono-num text-[#d6c7b2]">
+                    <div>Cannon-es 60Hz: {hud.cannonRigidBodyCount} bodies</div>
+                    <div>Verlet Cloth: {hud.verletClothNodeCount} nodes</div>
+                    <div>Zandatsu Tris: {hud.lastBisectedTriCount}</div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Verified CORS-Safe 3D Asset Presets & 6-Move Combat Reference */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                <div className="p-4 rounded bg-[#14100d] border border-[#3d322a]">
+                  <div className="text-xs font-bold text-[#fbbf24] mb-2.5">
+                    3. Verified CORS-Safe Khronos glTF &amp; Poly Haven HDRI Presets
+                  </div>
+                  <div className="space-y-2 max-h-52 overflow-y-auto pr-1">
+                    {VERIFIED_3D_ASSET_PRESETS.map((preset) => (
+                      <div
+                        key={preset.id}
+                        className="p-2.5 rounded bg-[#1c1612] border border-[#3d322a] flex items-center justify-between gap-2"
+                      >
+                        <div className="min-w-0">
+                          <div className="text-xs font-bold text-[#f3ebd9] truncate">
+                            {preset.name}{' '}
+                            <span className="text-[10px] text-[#34d399] font-mono-num">
+                              [{preset.slot.toUpperCase()}]
+                            </span>
+                          </div>
+                          <div className="text-[11px] text-[#c7b79e] truncate">
+                            {preset.description}
+                          </div>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            void handleLoadUrlForSlot(preset.slot, preset.url, preset.name)
+                          }
+                          className="px-2.5 py-1 text-xs font-semibold bg-[#991b1b] hover:bg-[#b91c1c] border border-[#fbbf24] text-[#f3ebd9] rounded cursor-pointer shrink-0"
+                        >
+                          Load Preset
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="p-4 rounded bg-[#14100d] border border-[#3d322a]">
+                  <div className="text-xs font-bold text-[#fbbf24] mb-2.5">
+                    4. 6-Move Cubic Hermite Spline Combat System &amp; 8-Ray Blade Hitbox
+                  </div>
+                  <div className="space-y-1.5 text-xs">
+                    {Object.values(SIX_COMBAT_MOVES).map((m: CombatMoveDefinition) => (
+                      <div
+                        key={m.id}
+                        className="p-2 rounded bg-[#1c1612] border border-[#2e241d] flex items-center justify-between"
+                      >
+                        <div>
+                          <span className="font-bold text-[#f3ebd9]">
+                            Move {m.moveNumber}: {m.name} ({m.kanji})
+                          </span>
+                          <span className="text-[11px] text-[#c7b79e] ml-2">[{m.inputLabel}]</span>
+                        </div>
+                        <span className="text-[11px] font-mono-num text-[#fbbf24]">
+                          {m.damageMultiplier}x Dmg · {m.postureDamageMultiplier}x Posture
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </div>
+
+              {/* 5. Nano Banana Pro (gemini-3-pro-image-preview) 4-Map PBR & POM Texture Forge */}
+              <div className="p-4 rounded bg-[#14100d] border border-[#38bdf8]/60 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <div className="text-xs font-bold text-[#38bdf8]">
+                      5. Nano Banana Pro (gemini-3-pro-image-preview) 4-Map Sobel-Scharr PBR &amp; 16-Step POM Forge
+                    </div>
+                    <div className="text-[11px] text-[#c7b79e]">
+                      Converts generated 2D textures into Albedo (sRGB), Tangent-Space Scharr Normal Map, Parallax Height Map, and Laplacian Roughness/Cavity Map in real time.
+                    </div>
+                  </div>
+                  <span className="text-[11px] font-mono-num text-[#a7f3d0]">
+                    Active: {hud.activePbrBundle?.title} ({hud.activePbrBundle?.sourceModel})
+                  </span>
+                </div>
+
+                <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                  {NANO_BANANA_PBR_PRESETS.map((preset) => (
+                    <button
+                      key={preset.id}
+                      type="button"
+                      disabled={pbrSynthesizing}
+                      onClick={() => {
+                        setPbrPresetId(preset.id);
+                        void handleSynthesizeNanoBananaPBR(preset.id, preset.prompt);
+                      }}
+                      className={`p-2 rounded text-left text-xs border cursor-pointer ${
+                        pbrPresetId === preset.id
+                          ? 'bg-[#172554] border-[#38bdf8] text-[#e0f2fe]'
+                          : 'bg-[#1c1612] border-[#3d322a] text-[#c7b79e] hover:text-[#f3ebd9]'
+                      }`}
+                    >
+                      <div className="font-bold truncate">
+                        {preset.name} ({preset.kanji})
+                      </div>
+                      <div className="text-[10px] text-[#38bdf8] font-mono-num">
+                        Slot: {preset.targetCategory.toUpperCase()} · POM {preset.pomDepthScale}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={pbrCustomPrompt}
+                    onChange={(e) => setPbrCustomPrompt(e.target.value)}
+                    placeholder="Custom Nano Banana Pro PBR prompt (e.g. Folded Damascus meteorite blade with gold Kintsugi veins)..."
+                    className="flex-1 bg-[#1c1612] border border-[#4a3b31] rounded px-3 py-1.5 text-xs text-[#f3ebd9]"
+                  />
+                  <button
+                    type="button"
+                    disabled={pbrSynthesizing}
+                    onClick={() =>
+                      void handleSynthesizeNanoBananaPBR(pbrPresetId, pbrCustomPrompt || undefined)
+                    }
+                    className="px-3.5 py-1.5 text-xs font-bold bg-[#1d4ed8] hover:bg-[#2563eb] border border-[#38bdf8] text-[#f3ebd9] rounded cursor-pointer whitespace-nowrap disabled:opacity-50"
+                  >
+                    {pbrSynthesizing ? 'Forging 4-Map PBR...' : 'Synthesize 4-Map PBR + POM'}
+                  </button>
+                </div>
+
+                {hud.activePbrBundle && (
+                  <div className="grid grid-cols-4 gap-2 pt-1">
+                    {[
+                      ['1. Albedo (sRGB)', hud.activePbrBundle.albedoUrl],
+                      ['2. Scharr Normal (XYZ)', hud.activePbrBundle.normalUrl],
+                      ['3. Parallax Height (H)', hud.activePbrBundle.heightUrl],
+                      ['4. Cavity / Roughness', hud.activePbrBundle.roughnessUrl],
+                    ].map(([label, url]) => (
+                      <div
+                        key={label}
+                        className="p-1.5 rounded bg-[#1c1612] border border-[#2e241d] text-center"
+                      >
+                        {url && (
+                          <img
+                            src={url}
+                            alt={label}
+                            className="w-full h-16 object-cover rounded border border-[#4a3b31] mb-1"
+                          />
+                        )}
+                        <div className="text-[10px] font-mono-num text-[#d6c7b2] truncate">
+                          {label}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </dialog>
+      )}
     </div>
   );
 }

@@ -1,0 +1,169 @@
+{
+  "entities": {
+    "SamuraiProfile": {
+      "title": "SamuraiProfile",
+      "description": "Persistent Samurai player profile storing progression, unlocked stages, loadout, appearance, and adaptive AI telemetry.",
+      "type": "object",
+      "properties": {
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the profile owner.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Samurai warrior display name.",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "bestScore": {
+          "type": "number",
+          "description": "Highest campaign score achieved."
+        },
+        "koku": {
+          "type": "number",
+          "description": "Accumulated Koku currency."
+        },
+        "highestUnlockedStage": {
+          "type": "number",
+          "description": "Highest unlocked campaign biome index (0-9)."
+        },
+        "primaryWeaponId": {
+          "type": "string",
+          "description": "Equipped primary blade ID.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "secondaryWeaponId": {
+          "type": "string",
+          "description": "Equipped secondary polearm/heavy weapon ID.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "rangedWeaponId": {
+          "type": "string",
+          "description": "Equipped ranged weapon ID.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "armorId": {
+          "type": "string",
+          "description": "Equipped Do armor set ID.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "helmetId": {
+          "type": "string",
+          "description": "Equipped Kabuto helmet ID.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server creation timestamp."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server last update timestamp."
+        }
+      },
+      "required": [
+        "ownerUid",
+        "displayName",
+        "bestScore",
+        "koku",
+        "highestUnlockedStage",
+        "primaryWeaponId",
+        "secondaryWeaponId",
+        "rangedWeaponId",
+        "armorId",
+        "helmetId",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "CombatRunRecord": {
+      "title": "CombatRunRecord",
+      "description": "Completed or saved combat chronicle entry with AI telemetry vector.",
+      "type": "object",
+      "properties": {
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the player who recorded this run.",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "stageIndex": {
+          "type": "number",
+          "description": "Stage biome index (0-9)."
+        },
+        "score": {
+          "type": "number",
+          "description": "Run score achieved."
+        },
+        "weaponUsed": {
+          "type": "string",
+          "description": "Primary weapon used during the run.",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "aiStance": {
+          "type": "string",
+          "description": "Adaptive AI counter stance at run end.",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "status": {
+          "type": "string",
+          "description": "Run status (active or completed).",
+          "enum": ["active", "completed"]
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the run was recorded."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when the run was updated."
+        }
+      },
+      "required": [
+        "ownerUid",
+        "stageIndex",
+        "score",
+        "weaponUsed",
+        "aiStance",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": {
+        "$ref": "#/entities/SamuraiProfile"
+      },
+      "description": "Stores each authenticated Samurai player's persistent profile and loadout."
+    },
+    "/users/{userId}/runs/{runId}": {
+      "schema": {
+        "$ref": "#/entities/CombatRunRecord"
+      },
+      "description": "Subcollection of combat run chronicles owned by the parent user."
+    }
+  }
+}

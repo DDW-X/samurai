@@ -780,8 +780,8 @@ export const WEAPONS: WeaponDef[] = [
   {
     id: 'hiya_zutsu',
     index: 30,
-    name: 'Hiya-Zutsu (Bo-Hiya Rocket Hand-Cannon)',
-    kanji: '火矢筒・棒火矢',
+    name: 'Ozutsu Blunderbuss & Hiya-Zutsu Cannon',
+    kanji: '大筒・火矢筒',
     category: 'ranged',
     damage: 112,
     postureDamage: 95,
@@ -794,13 +794,13 @@ export const WEAPONS: WeaponDef[] = [
     critMultiplier: 2.1,
     projectileSpeed: 38,
     reloadTime: 1.35,
-    specialEffect: '5.0m Bo-Hiya Napalm Rocket Firestorm Detonation',
+    specialEffect: '8-Pellet Blunderbuss Shrapnel Cone & 5.0m Firestorm',
     description:
-      'Heavy bronze-banded matchlock siege mortar firing Bo-Hiya rocket arrows that scream across the battlefield and detonate in a 5.0m firestorm.',
+      'Flared-muzzle bronze Ozutsu Blunderbuss and siege mortar firing an 8-pellet shrapnel cone with heavy knockback and Bo-Hiya firestorm rounds.',
     bladeColor: 0xb45309,
     hiltColor: 0x451a03,
     trailColor: 0xef4444,
-    metricSpecs: 'Bore Ø48mm · Barrel 0.95m · Projectiles: Bo-Hiya Rocket Arrows',
+    metricSpecs: 'Flared Bore Ø48mm · Barrel 0.95m · 8-Pellet Shrapnel + Bo-Hiya',
     wazamonoGrade: 'Saijo O-Wazamono',
     auraMotif: 'ember_smoke',
     aiPrompt:

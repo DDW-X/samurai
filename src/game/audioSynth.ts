@@ -281,4 +281,242 @@ export class SamuraiAudioSynth {
     osc.start(now);
     osc.stop(now + 0.065);
   }
+
+  /**
+   * 3D HRTF Spatial Audio Panner helper: positions sound in 3D space relative to player listener.
+   */
+  private createSpatialOutNode(
+    ctx: AudioContext,
+    sourceWorldPos?: { x: number; y: number; z: number },
+    listenerWorldPos?: { x: number; y: number; z: number }
+  ): AudioNode {
+    if (!sourceWorldPos || !listenerWorldPos || typeof ctx.createPanner !== 'function') {
+      return ctx.destination;
+    }
+    try {
+      const panner = ctx.createPanner();
+      panner.panningModel = 'HRTF';
+      panner.distanceModel = 'inverse';
+      panner.refDistance = 3.0;
+      panner.maxDistance = 60.0;
+      panner.rolloffFactor = 1.2;
+      const dx = sourceWorldPos.x - listenerWorldPos.x;
+      const dy = sourceWorldPos.y - listenerWorldPos.y;
+      const dz = sourceWorldPos.z - listenerWorldPos.z;
+      panner.setPosition(
+        Number.isFinite(dx) ? dx : 0,
+        Number.isFinite(dy) ? dy : 0,
+        Number.isFinite(dz) ? dz : 0
+      );
+      panner.connect(ctx.destination);
+      return panner;
+    } catch {
+      return ctx.destination;
+    }
+  }
+
+  /**
+   * Web Audio Formant Vocal-Tract Synthesizer for Samurai Kiai War Cries ("Ha!", "Sei!", "Teyaa!", "Zandatsu!")
+   * Chains sawtooth glottal source + breath burst through 3 parallel Bandpass Formant Filters (F1, F2, F3).
+   */
+  public playKiaiVocalFormant(
+    kiaiType: 'ha' | 'sei' | 'teyaa' | 'zandatsu' | 'kuji_in' = 'ha',
+    sourcePos?: { x: number; y: number; z: number },
+    listenerPos?: { x: number; y: number; z: number }
+  ) {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const outNode = this.createSpatialOutNode(ctx, sourcePos, listenerPos);
+
+    const presets: Record<
+      typeof kiaiType,
+      { f0Start: number; f0End: number; dur: number; formants: [number, number, number] }
+    > = {
+      ha: { f0Start: 158, f0End: 118, dur: 0.24, formants: [780, 1220, 2550] },
+      sei: { f0Start: 185, f0End: 145, dur: 0.28, formants: [480, 1980, 2720] },
+      teyaa: { f0Start: 210, f0End: 132, dur: 0.42, formants: [720, 1620, 2650] },
+      zandatsu: { f0Start: 142, f0End: 96, dur: 0.48, formants: [680, 1340, 2420] },
+      kuji_in: { f0Start: 112, f0End: 108, dur: 0.55, formants: [360, 920, 2150] },
+    };
+
+    const cfg = presets[kiaiType] || presets.ha;
+    const glottal = ctx.createOscillator();
+    glottal.type = 'sawtooth';
+    glottal.frequency.setValueAtTime(cfg.f0Start, now);
+    glottal.frequency.exponentialRampToValueAtTime(cfg.f0End, now + cfg.dur);
+
+    const masterGain = ctx.createGain();
+    masterGain.gain.setValueAtTime(0.001, now);
+    masterGain.gain.linearRampToValueAtTime(0.11, now + 0.025);
+    masterGain.gain.exponentialRampToValueAtTime(0.0008, now + cfg.dur);
+    masterGain.connect(outNode);
+
+    cfg.formants.forEach((fFreq, idx) => {
+      const bp = ctx.createBiquadFilter();
+      bp.type = 'bandpass';
+      bp.frequency.setValueAtTime(fFreq, now);
+      bp.Q.setValueAtTime(6.5 + idx * 2, now);
+
+      const fGain = ctx.createGain();
+      fGain.gain.value = 1 / (idx + 1);
+
+      glottal.connect(bp);
+      bp.connect(fGain);
+      fGain.connect(masterGain);
+    });
+
+    glottal.start(now);
+    glottal.stop(now + cfg.dur + 0.03);
+  }
+
+  /**
+   * Deep Sub-Bass & Formant Growl Synthesizer for Mythological Yokai (Oni Warlords, Jorogumo, Gashadokuro, Mizuchi).
+   */
+  public playYokaiRoarFormant(
+    yokaiType: 'oni' | 'jorogumo' | 'gashadokuro' | 'tengu' | 'mizuchi' = 'oni',
+    sourcePos?: { x: number; y: number; z: number },
+    listenerPos?: { x: number; y: number; z: number }
+  ) {
+    const ctx = this.ensureContext();
+    if (!ctx) return;
+    const now = ctx.currentTime;
+    const outNode = this.createSpatialOutNode(ctx, sourcePos, listenerPos);
+
+    const basePitch =
+      yokaiType === 'gashadokuro'
+        ? 48
+        : yokaiType === 'oni'
+          ? 64
+          : yokaiType === 'mizuchi'
+            ? 88
+            : yokaiType === 'tengu'
+              ? 240
+              : 175;
+    const dur = yokaiType === 'gashadokuro' ? 0.85 : 0.58;
+
+    const osc = ctx.createOscillator();
+    const mod = ctx.createOscillator();
+    const modGain = ctx.createGain();
+    const filter = ctx.createBiquadFilter();
+    const gain = ctx.createGain();
+
+    osc.type = 'sawtooth';
+    osc.frequency.setValueAtTime(basePitch * 1.25, now);
+    osc.frequency.exponentialRampToValueAtTime(basePitch * 0.65, now + dur);
+
+    mod.type = 'sine';
+    mod.frequency.setValueAtTime(yokaiType === 'jorogumo' ? 44 : 22, now);
+    modGain.gain.setValueAtTime(basePitch * 0.35, now);
+
+    filter.type = 'bandpass';
+    filter.frequency.setValueAtTime(basePitch * 4.2, now);
+    filter.Q.setValueAtTime(4.0, now);
+
+    gain.gain.setValueAtTime(0.001, now);
+    gain.gain.linearRampToValueAtTime(0.14, now + 0.05);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + dur);
+
+    mod.connect(modGain);
+    modGain.connect(osc.frequency);
+    osc.connect(filter);
+    filter.connect(gain);
+    gain.connect(outNode);
+
+    osc.start(now);
+    mod.start(now);
+    osc.stop(now + dur + 0.04);
+    mod.stop(now + dur + 0.04);
+  }
+
+  /**
+   * Hybrid Japanese Voice & Dialogue Synthesizer (`window.speechSynthesis` `ja-JP` with Formant Vocal-Tract fallback).
+   */
+  public speakJapaneseBattleLine(
+    japaneseRomaji: string,
+    japaneseKanji: string,
+    pitch = 0.82,
+    rate = 1.05,
+    sourcePos?: { x: number; y: number; z: number },
+    listenerPos?: { x: number; y: number; z: number }
+  ) {
+    if (this.isMuted) return;
+    // Always trigger subtle vocal formant resonance so audio is immediate even in headless/no-TTS browsers
+    this.playKiaiVocalFormant('ha', sourcePos, listenerPos);
+
+    if (typeof window !== 'undefined' && 'speechSynthesis' in window) {
+      try {
+        window.speechSynthesis.cancel();
+        const utter = new SpeechSynthesisUtterance(japaneseKanji || japaneseRomaji);
+        utter.lang = 'ja-JP';
+        utter.pitch = pitch;
+        utter.rate = rate;
+        utter.volume = 0.65;
+        window.speechSynthesis.speak(utter);
+      } catch {
+        // Fallback already handled via formant synthesizer
+      }
+    }
+  }
 }
+
+export interface BilingualBattleDialogue {
+  id: string;
+  speaker: string;
+  japaneseKanji: string;
+  romaji: string;
+  english: string;
+  category: 'patrol_alert' | 'flank_order' | 'archer_volley' | 'boss_challenge' | 'samurai_kiai' | 'kuji_in';
+}
+
+export const BILINGUAL_BATTLE_DIALOGUES: Record<string, BilingualBattleDialogue> = {
+  katana_wo_nuke: {
+    id: 'katana_wo_nuke',
+    speaker: 'Ronin Patrol Captain',
+    japaneseKanji: '刀を抜け！曲者だ！',
+    romaji: 'Katana wo nuke! Kusemono da!',
+    english: 'Draw your blades! Intruder sighted!',
+    category: 'patrol_alert',
+  },
+  kakome: {
+    id: 'kakome',
+    speaker: 'Ashigaru Vanguard',
+    japaneseKanji: '囲め！退路を断て！',
+    romaji: 'Kakome! Tairo wo tate!',
+    english: 'Surround him! Cut off his retreat!',
+    category: 'flank_order',
+  },
+  yumi_tai_hanate: {
+    id: 'yumi_tai_hanate',
+    speaker: 'Bandit Marksman Commander',
+    japaneseKanji: '弓隊、放て！火矢を浴びせよ！',
+    romaji: 'Yumi-tai, hanate! Hiya wo abiseyo!',
+    english: 'Archers, loose! Rain fire arrows upon him!',
+    category: 'archer_volley',
+  },
+  boss_challenge: {
+    id: 'boss_challenge',
+    speaker: 'Yokai Warlord',
+    japaneseKanji: '貴様の剣、見せてみろ…墨の刃で散れ！',
+    romaji: 'Kisama no ken, misete miro... Sumi no yaiba de chire!',
+    english: 'Show me your blade... Scatter before the Ink Edge!',
+    category: 'boss_challenge',
+  },
+  samurai_zandatsu: {
+    id: 'samurai_zandatsu',
+    speaker: 'Kensei (Player)',
+    japaneseKanji: '一刀両断・残奪！',
+    romaji: 'Itto Ryodan — Zandatsu!',
+    english: 'One Stroke, Two Halves — Sever!',
+    category: 'samurai_kiai',
+  },
+  kuji_in_mantra: {
+    id: 'kuji_in_mantra',
+    speaker: 'Kensei (Player)',
+    japaneseKanji: '臨・兵・闘・者・皆・陣・列・在・前！',
+    romaji: 'Rin · Pyo · To · Sha · Kai · Jin · Retsu · Zai · Zen!',
+    english: 'Nine Syllables of Kuji-in: Awaken the Inner Ki!',
+    category: 'kuji_in',
+  },
+};
+

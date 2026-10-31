@@ -1,7 +1,9 @@
 import * as THREE from 'three';
+import * as CANNON from 'cannon-es';
 import { RoomEnvironment } from 'three/addons/environments/RoomEnvironment.js';
 import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
 import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
 import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
 import {
   WEAPONS,
@@ -23,7 +25,6 @@ import {
   EnemyArchetypeDef,
   BossDef,
 } from './stages';
-import { SamuraiAudioSynth } from './audioSynth';
 import {
   createProceduralTextures,
   createSamuraiHeroRig,
@@ -33,9 +34,12 @@ import {
   createProjectileMesh,
   createSumiWashiMaterial,
   createUrushiLacquerMaterial,
-  createKamiSobelShaderDefinition,
   createSplineLatheGeometry,
   createIrimoyaPagodaRoofGeometry,
+  createMultiBladeGrassClumpGeometry,
+  createSegmentedBambooWithNodesGeometry,
+  applyMoroteDualHandWeaponIK,
+  buildGnarledJapaneseTree,
   SamuraiRig,
   ProceduralTextures,
 } from './proceduralMeshes';
@@ -48,6 +52,65 @@ import {
   DodgeModeId,
   stepPendulumGrapple,
 } from './characterCustomization';
+import {
+  SmartAssetManager,
+  AssetTargetSlot,
+  InspectedModelTelemetry,
+  VERIFIED_3D_ASSET_PRESETS,
+  inspectObject3DTelemetry,
+} from './assetManager';
+import {
+  CannonMultiPhysicsEngine,
+  VerletClothSheet,
+  sliceBufferGeometryByPlane,
+  solveTwoBoneIK,
+  computeAerodynamicDragForce,
+  sanitizePhysicsVec3,
+} from './multiPhysics';
+import {
+  SIX_COMBAT_MOVES,
+  SixMoveCombatId,
+  CombatMoveDefinition,
+  evaluateSixMoveCombatTrajectory,
+  generateEightBladeRays,
+  checkEightBladeRayHit,
+  evaluateSekiroDeflectAngle,
+  createAnisotropicKuwaharaSumiShader,
+} from './combatSplinesAndShaders';
+import {
+  InfiniteOpenWorldCDLODManager,
+  FloatingOriginTelemetry,
+  OPEN_WORLD_BIOMES,
+  OpenWorldBiomeDefinition,
+  hash2D,
+} from './openWorldEngine';
+import {
+  NANO_BANANA_PBR_PRESETS,
+  NanoBananaPresetId,
+  SobelPBRMapBundle,
+  synthesizeNanoBananaPBRBundle,
+  applyPOMAndTriplanarMaterial,
+  buildFourMapPBRBundleFromCanvas,
+  generateProceduralSourceCanvas,
+} from './pbrTextureForge';
+import {
+  InteractiveComboDojoController,
+  DojoTrainerSnapshot,
+  DOJO_CURRICULUM_LESSONS,
+} from './comboDojoTrainer';
+import {
+  SamuraiAudioSynth,
+  BILINGUAL_BATTLE_DIALOGUES,
+  BilingualBattleDialogue,
+} from './audioSynth';
+
+export type CameraPerspectiveMode = 'third_person_rpg' | 'first_person_fpv' | 'isometric_tactical';
+
+export const CAMERA_MODE_LABELS: Record<CameraPerspectiveMode, string> = {
+  third_person_rpg: 'Mode 1: Over-Shoulder 3rd-Person RPG',
+  first_person_fpv: 'Mode 2: 1st-Person Samurai FPV',
+  isometric_tactical: 'Mode 3: Tactical Isometric 45°',
+};
 
 export interface FloatingDamageText {
   id: number;
@@ -61,6 +124,8 @@ export interface FloatingDamageText {
 
 export interface HUDStateSnapshot {
   gameState: 'title' | 'playing' | 'paused' | 'gameover' | 'victory';
+  cameraMode: CameraPerspectiveMode;
+  cameraModeLabel: string;
   hp: number;
   maxHp: number;
   ghostHp: number;
@@ -111,6 +176,31 @@ export interface HUDStateSnapshot {
   shadowCrossReady: boolean;
   grappleActive: boolean;
   armorIntegrity: number;
+  // Multi-Physics, 6-Move Combat & 3D Asset Inspector Telemetry
+  activeCombatMove: SixMoveCombatId;
+  activeCombatMoveDef: CombatMoveDefinition;
+  lastBladeRayHits: number;
+  lastBisectedTriCount: number;
+  verletClothNodeCount: number;
+  cannonRigidBodyCount: number;
+  inspectedTelemetry: InspectedModelTelemetry | null;
+  lastDeflectAngleDeg: number;
+  // Open-World CDLOD, Interactive Combo Dojo, Nano Banana Pro PBR & Bilingual Dialogue Telemetry
+  openWorldTelemetry: FloatingOriginTelemetry;
+  dojoSnapshot: DojoTrainerSnapshot;
+  activePbrBundle: {
+    presetId: string;
+    title: string;
+    targetSlot: 'weapon' | 'armor' | 'terrain';
+    sourceModel: string;
+    pomSteps: number;
+    triplanarActive: boolean;
+    albedoUrl: string;
+    normalUrl: string;
+    heightUrl: string;
+    roughnessUrl: string;
+  } | null;
+  activeDialogueSubtitle: BilingualBattleDialogue | null;
 }
 
 interface ActiveEnemy {
@@ -193,14 +283,49 @@ export class SamuraiEngine {
 
   public audio = new SamuraiAudioSynth();
   public aiBrain = new AdaptiveAIBrain();
+  public assetManager = new SmartAssetManager();
+  public multiPhysics = new CannonMultiPhysicsEngine();
+  public openWorld = new InfiniteOpenWorldCDLODManager();
+  public comboDojo = new InteractiveComboDojoController();
+  private lastOpenWorldTelemetry: FloatingOriginTelemetry = {
+    floatingOriginShiftCount: 0,
+    accumulatedWorldOffset: { x: 0, y: 0, z: 0 },
+    activeChunkCount: 25,
+    disposedChunkCount: 0,
+    currentBiome: OPEN_WORLD_BIOMES.misty_bamboo_forest,
+    currentElevationMeters: 0,
+    inSubterraneanCave: false,
+    inShallowWater: false,
+    onSuspensionBridge: false,
+  };
+  private lastDojoSnapshot!: DojoTrainerSnapshot;
+  private activePbrBundle: SobelPBRMapBundle | null = null;
+  private activeDialogueSubtitle: BilingualBattleDialogue | null = null;
+  private dialogueTimer = 0;
   private textures!: ProceduralTextures;
+  private haoriVerletCloth: VerletClothSheet | null = null;
+  private bannerVerletCloth: VerletClothSheet | null = null;
+  private customAssetMixers: THREE.AnimationMixer[] = [];
 
-  // Game & Stage State (10 Biomes)
+  // 3-Mode Camera Switcher State (Key V: 1. Over-the-Shoulder 3rd-Person RPG [DEFAULT], 2. 1st-Person FPV, 3. Isometric Tactical)
+  public cameraMode: CameraPerspectiveMode = 'third_person_rpg';
+  private spawnedChunkKeys = new Set<string>();
+
+  // 6-Move Hermite Spline Combat & 8-Ray Blade Raycasting State
+  private activeCombatMove: SixMoveCombatId = 'kesa_giri';
+  private activeMoveDuration = 0.28;
+  private lastBladeRayHits = 8;
+  private lastBisectedTriCount = 0;
+  private lastDeflectAngleDeg = 0;
+  private prevTsubaWorld = new THREE.Vector3();
+  private prevKissakiWorld = new THREE.Vector3();
+
+  // Game & Stage State (Infinite Seamless Multi-Biome Open World)
   private gameState: HUDStateSnapshot['gameState'] = 'title';
   private isDojoMode = false;
   private customizerMode = false;
   private stageIndex = 0;
-  private highestUnlockedStage = CAMPAIGN_STAGES.length - 1; // All 10 Biomes unlocked & inspectable
+  private highestUnlockedStage = CAMPAIGN_STAGES.length - 1;
   private score = 0;
   private bestScore = 1200;
   private koku = 350;
@@ -208,7 +333,7 @@ export class SamuraiEngine {
   private comboTimer = 0;
   private runTimeSec = 0;
   private damageTakenRun = 0;
-  private statusBanner = 'Bamboo Forest of Whispers · Strike with Honor';
+  private statusBanner = 'Seamless 5×5 Open World · Press [V] to Switch Camera Mode';
 
   // Character Appearance & 3D Face Customizer State
   private appearance: CharacterAppearanceConfig = { ...DEFAULT_CHARACTER_APPEARANCE };
@@ -226,7 +351,7 @@ export class SamuraiEngine {
   private stats!: ComputedSamuraiStats;
   private armorIntegrity = 100;
 
-  // 5 Elemental Weapon Infusions (Z, X, C, V, B)
+  // 5 Elemental Weapon Infusions (Z, X, C, N, B)
   private activeInfusion: ElementalInfusionId = 'none';
 
   // 7-Mode Dodge, Acrobatics & Kaginawa Grappling Hook State
@@ -411,49 +536,52 @@ export class SamuraiEngine {
     pmremGenerator.dispose();
 
     this.camera = new THREE.PerspectiveCamera(
-      44,
+      52,
       (this.container.clientWidth || window.innerWidth) /
         (this.container.clientHeight || window.innerHeight),
-      0.35,
-      170
+      0.22,
+      650
     );
 
     const maxAniso = this.renderer.capabilities.getMaxAnisotropy() || 1;
     this.textures = createProceduralTextures(maxAniso);
 
-    // Hardware GPU Sobel/Laplacian Ink Outline & Washi Paper Post-Processing Pass
+    // Hardware GPU Multi-Pass EffectComposer: RenderPass + UnrealBloomPass + Anisotropic Kuwahara & Sumi-e Edge Pass
     if (!this.isSoftwareGl) {
       const w = this.container.clientWidth || window.innerWidth;
       const h = this.container.clientHeight || window.innerHeight;
       this.composer = new EffectComposer(this.renderer);
       this.composer.addPass(new RenderPass(this.scene, this.camera));
-      const sobelDef = createKamiSobelShaderDefinition(this.textures.washiAlbedo);
-      sobelDef.uniforms.uResolution.value.set(w, h);
-      this.sobelPass = new ShaderPass(sobelDef);
+      const bloomPass = new UnrealBloomPass(new THREE.Vector2(w, h), 0.36, 0.35, 0.86);
+      this.composer.addPass(bloomPass);
+      const kuwaharaSumiDef = createAnisotropicKuwaharaSumiShader();
+      kuwaharaSumiDef.uniforms.uResolution.value.set(w, h);
+      this.sobelPass = new ShaderPass(kuwaharaSumiDef);
       this.composer.addPass(this.sobelPass);
     }
 
     // 3-Point Balanced Studio + Outdoor Rig
-    const hemiLight = new THREE.HemisphereLight(0xe6dec8, 0x383b2e, 0.85);
+    const hemiLight = new THREE.HemisphereLight(0xe6dec8, 0x383b2e, 0.9);
     hemiLight.name = 'hemiLight';
     this.scene.add(hemiLight);
 
-    const keyLight = new THREE.DirectionalLight(0xfff3d6, 2.2);
+    const keyLight = new THREE.DirectionalLight(0xfff3d6, 2.35);
     keyLight.name = 'keyLight';
-    keyLight.position.set(22, 36, 24);
+    keyLight.position.set(26, 42, 28);
     keyLight.castShadow = !this.isSoftwareGl;
-    keyLight.shadow.mapSize.set(1024, 1024);
-    keyLight.shadow.camera.left = -35;
-    keyLight.shadow.camera.right = 35;
-    keyLight.shadow.camera.top = 35;
-    keyLight.shadow.camera.bottom = -35;
-    keyLight.shadow.camera.near = 5;
-    keyLight.shadow.camera.far = 95;
+    const shadowRes = this.isSoftwareGl ? 1024 : 2048;
+    keyLight.shadow.mapSize.set(shadowRes, shadowRes);
+    keyLight.shadow.camera.left = -48;
+    keyLight.shadow.camera.right = 48;
+    keyLight.shadow.camera.top = 48;
+    keyLight.shadow.camera.bottom = -48;
+    keyLight.shadow.camera.near = 4;
+    keyLight.shadow.camera.far = 140;
     keyLight.shadow.bias = -0.0005;
     keyLight.shadow.normalBias = 0.02;
     this.scene.add(keyLight);
 
-    const rimLight = new THREE.DirectionalLight(0x93c5fd, 0.9);
+    const rimLight = new THREE.DirectionalLight(0x93c5fd, 0.95);
     rimLight.position.set(-24, 18, -22);
     this.scene.add(rimLight);
 
@@ -468,6 +596,29 @@ export class SamuraiEngine {
       this.appearance
     );
     this.scene.add(this.playerRig.root);
+
+    // Attach Real-Time 3D Verlet Integration Haori Cloak Grid (8x10 = 99 particles) to Samurai Back
+    const haoriClothMat = createSumiWashiMaterial(
+      this.equippedArmor.primaryColor,
+      0.72,
+      0.1,
+      this.textures
+    );
+    haoriClothMat.side = THREE.DoubleSide;
+    this.haoriVerletCloth = new VerletClothSheet(0.68, 0.82, 8, 10, haoriClothMat);
+    this.haoriVerletCloth.mesh.position.set(0, 0.68, -0.22);
+    this.playerRig.torsoGroup.add(this.haoriVerletCloth.mesh);
+
+    // Record initial 3D mesh telemetry for the Live 3D Asset Inspector
+    this.assetManager.setLastTelemetry(
+      inspectObject3DTelemetry(
+        this.playerRig.root,
+        'Parametric Mathematical Samurai Rig',
+        'samurai',
+        'procedural://mathematical-samurai-rig',
+        6
+      )
+    );
 
     // Initialize Kaginawa Grappling Silk Rope Line
     const ropeGeo = new THREE.BufferGeometry().setFromPoints([
@@ -496,6 +647,42 @@ export class SamuraiEngine {
       this.resetAmbientParticle(i, true);
     }
     this.scene.add(this.particleMesh);
+
+    // Initialize Infinite Open-World CDLOD Water, Bridges & Holographic Dojo Ghost Master
+    this.openWorld.initWaterAndBridges(this.scene, this.textures.washiNormal, this.textures.washiBump);
+    this.comboDojo.attachGhostMasterToScene(this.scene);
+    this.lastDojoSnapshot = this.comboDojo.stepGhostMasterAndTelemetry(0, this.playerPos, this.playerYaw, null, 0);
+    this.lastOpenWorldTelemetry = this.openWorld.updateStreamedWorld(
+      this.playerPos,
+      0,
+      this.textures.washiNormal,
+      this.textures.washiBump,
+      undefined,
+      (cx, cz, wx, wz, biome) => this.spawnOpenWorldChunkEntities(cx, cz, wx, wz, biome)
+    );
+
+    // Synthesize initial 4-Map Sobel-Scharr PBR + POM bundle (Tamahagane Damascus)
+    const defaultPreset = NANO_BANANA_PBR_PRESETS[0];
+    const srcCanvas = generateProceduralSourceCanvas(defaultPreset.id, defaultPreset.prompt, 128);
+    this.activePbrBundle = buildFourMapPBRBundleFromCanvas(
+      srcCanvas,
+      defaultPreset.id,
+      defaultPreset.normalStrength,
+      'procedural-sobel-synthesizer'
+    );
+    this.applyActivePBRBundleToMeshSlot(this.activePbrBundle);
+
+    // WebGL Context Loss & Restoration Defensive Guard
+    this.renderer.domElement.addEventListener('webglcontextlost', (e) => {
+      e.preventDefault();
+      this.statusBanner = 'WebGL Context Lost — Preserving Simulation State...';
+    });
+    this.renderer.domElement.addEventListener('webglcontextrestored', () => {
+      this.recomputeStatsAndVisuals();
+      this.loadStage(this.stageIndex);
+      this.statusBanner = 'WebGL Context Restored · 60 FPS Pipeline Active';
+      this.broadcastHUD(true);
+    });
   }
 
   private resetAmbientParticle(i: number, randomHeight = false) {
@@ -557,7 +744,52 @@ export class SamuraiEngine {
         this.textures,
         this.appearance
       );
+      applyMoroteDualHandWeaponIK(this.playerRig, {
+        isParrying: this.parryWindowTimer > 0,
+        isAttacking: this.attackAnimTimer > 0,
+        activeMoveId: 1,
+        swingProgress: 0,
+        gaitSwing: 0,
+        breathTime: this.runTimeSec,
+        cameraMode: this.cameraMode,
+      });
     }
+    this.broadcastHUD(true);
+  }
+
+  // ============================================================================
+  // 3-MODE CAMERA SWITCHER API (KEY V)
+  // 1. Over-the-Shoulder 3rd-Person RPG (DEFAULT)
+  // 2. 1st-Person Samurai FPV (Two Hands Gripping Weapon in Viewport)
+  // 3. Tactical Isometric 45° Overhead View
+  // ============================================================================
+  public cycleCameraMode(): CameraPerspectiveMode {
+    const order: CameraPerspectiveMode[] = [
+      'third_person_rpg',
+      'first_person_fpv',
+      'isometric_tactical',
+    ];
+    const nextIdx = (order.indexOf(this.cameraMode) + 1) % order.length;
+    this.setCameraMode(order[nextIdx]);
+    return this.cameraMode;
+  }
+
+  public setCameraMode(mode: CameraPerspectiveMode) {
+    this.cameraMode = mode;
+    const label = CAMERA_MODE_LABELS[mode];
+    this.statusBanner = `[V] CAMERA SWITCHED → ${label}`;
+    if (this.playerRig) {
+      applyMoroteDualHandWeaponIK(this.playerRig, {
+        isParrying: this.parryWindowTimer > 0,
+        isAttacking: this.attackAnimTimer > 0,
+        activeMoveId: (this.comboStep % 6) + 1,
+        swingProgress: 0,
+        gaitSwing: 0,
+        breathTime: this.runTimeSec,
+        cameraMode: this.cameraMode,
+      });
+    }
+    this.pushFloatingText(`🎥 ${label.toUpperCase()}`, this.playerPos, '#38bdf8', true);
     this.broadcastHUD(true);
   }
 
@@ -568,7 +800,6 @@ export class SamuraiEngine {
     this.customizerMode = open;
     this.customizerOrbitYaw = 0;
     if (open) {
-      // Automatically show face clearly while customizing, unless user toggles helmet
       this.appearance = { ...this.appearance, hideHelmetInGameplay: true };
       this.recomputeStatsAndVisuals();
       this.playerRig.root.position.copy(this.playerPos);
@@ -591,7 +822,7 @@ export class SamuraiEngine {
     this.activeInfusion = this.activeInfusion === infusionId ? 'none' : infusionId;
     const def = this.getActiveInfusionDef();
     if (this.activeInfusion !== 'none') {
-      this._v1.copy(this.playerPos).setY(1.2);
+      this._v1.copy(this.playerPos).setY(this.playerPos.y + 1.2);
       this.spawnBurstParticles(this._v1, def.trailColorHex, 24, 7.5);
       this.audio.playSwordSlash(true);
       this.pushFloatingText(
@@ -605,7 +836,138 @@ export class SamuraiEngine {
   }
 
   // ============================================================================
-  // STAGE BUILDER (10 BIOMES, TORII SPIRIT PORTALS, INTERACTIVE GRASS & BAMBOO)
+  // AGENTIC 3D ASSET FETCHING, GLTF/HDRI HOT-SWAPPING & LIVE MODEL INSPECTOR
+  // ============================================================================
+  public inspectTargetSlotTelemetry(slot: AssetTargetSlot) {
+    if (slot === 'weapon') {
+      const t = inspectObject3DTelemetry(
+        this.playerRig.weaponMount,
+        this.getCurrentWeapon().name,
+        'weapon',
+        `procedural://weapon/${this.getCurrentWeapon().id}`,
+        6
+      );
+      this.assetManager.setLastTelemetry(t);
+    } else if (slot === 'boss' && this.enemies.length > 0) {
+      const bossOrFoe = this.enemies.find((e) => e.isBoss) || this.enemies[0];
+      const t = inspectObject3DTelemetry(
+        bossOrFoe.rig.root,
+        bossOrFoe.name,
+        'boss',
+        `procedural://enemy/${bossOrFoe.name}`,
+        4
+      );
+      this.assetManager.setLastTelemetry(t);
+    } else {
+      const t = inspectObject3DTelemetry(
+        this.playerRig.root,
+        'Parametric Mathematical Samurai Rig',
+        'samurai',
+        'procedural://mathematical-samurai-rig',
+        6
+      );
+      this.assetManager.setLastTelemetry(t);
+    }
+    this.broadcastHUD(true);
+  }
+
+  public async loadCustomGLTFUrlForSlot(
+    url: string,
+    slot: AssetTargetSlot,
+    displayName = 'Custom 3D GLTF Model'
+  ): Promise<InspectedModelTelemetry> {
+    if (url.startsWith('procedural://')) {
+      this.recomputeStatsAndVisuals();
+      this.inspectTargetSlotTelemetry(slot);
+      return this.assetManager.getLastTelemetry()!;
+    }
+    if (slot === 'hdri' || url.toLowerCase().endsWith('.hdr')) {
+      await this.assetManager.loadHDRIEnvironment(url, this.renderer, this.scene);
+      const hdrTelemetry: InspectedModelTelemetry = {
+        name: displayName,
+        slot: 'hdri',
+        sourceUrlOrFile: url,
+        vertexCount: 0,
+        triangleCount: 0,
+        meshCount: 1,
+        boneCount: 0,
+        skinnedMeshCount: 0,
+        animationClipCount: 0,
+        materialChannels: ['32-bit RGBE Equirectangular PMREM IBL'],
+        boundingBoxMeters: { x: 180, y: 90, z: 180 },
+        loadedAtIso: new Date().toLocaleTimeString(),
+      };
+      this.assetManager.setLastTelemetry(hdrTelemetry);
+      this.statusBanner = `Applied Real HDRI Environment Map: ${displayName}`;
+      this.broadcastHUD(true);
+      return hdrTelemetry;
+    }
+
+    const targetHeight = slot === 'weapon' ? 1.35 : slot === 'boss' ? 2.35 : 1.82;
+    const loaded = await this.assetManager.loadGLTFfromUrl(url, slot, targetHeight, displayName);
+    this.applyLoadedModelToSlot(loaded.model, loaded.animations, slot, displayName);
+    this.broadcastHUD(true);
+    return loaded.telemetry;
+  }
+
+  public async loadDroppedGLTFFileForSlot(
+    file: File,
+    slot: AssetTargetSlot
+  ): Promise<InspectedModelTelemetry> {
+    if (file.name.toLowerCase().endsWith('.hdr')) {
+      const blobUrl = URL.createObjectURL(file);
+      try {
+        return await this.loadCustomGLTFUrlForSlot(blobUrl, 'hdri', file.name);
+      } finally {
+        URL.revokeObjectURL(blobUrl);
+      }
+    }
+    const targetHeight = slot === 'weapon' ? 1.35 : slot === 'boss' ? 2.35 : 1.82;
+    const loaded = await this.assetManager.loadGLTFfromFile(file, slot, targetHeight);
+    this.applyLoadedModelToSlot(loaded.model, loaded.animations, slot, file.name);
+    this.broadcastHUD(true);
+    return loaded.telemetry;
+  }
+
+  private applyLoadedModelToSlot(
+    model: THREE.Group,
+    animations: THREE.AnimationClip[],
+    slot: AssetTargetSlot,
+    displayName: string
+  ) {
+    if (animations.length > 0) {
+      const mixer = new THREE.AnimationMixer(model);
+      mixer.clipAction(animations[0]).play();
+      this.customAssetMixers.push(mixer);
+    }
+
+    if (slot === 'weapon') {
+      while (this.playerRig.weaponMount.children.length > 0) {
+        this.playerRig.weaponMount.remove(this.playerRig.weaponMount.children[0]);
+      }
+      this.playerRig.weaponMount.add(model);
+      this.statusBanner = `Hot-Swapped Weapon 3D Model → ${displayName}`;
+    } else if (slot === 'boss' && this.enemies.length > 0) {
+      const targetEnemy = this.enemies.find((e) => e.isBoss) || this.enemies[0];
+      while (targetEnemy.rig.bodyPivot.children.length > 0) {
+        targetEnemy.rig.bodyPivot.remove(targetEnemy.rig.bodyPivot.children[0]);
+      }
+      targetEnemy.rig.bodyPivot.add(model);
+      this.statusBanner = `Hot-Swapped Boss/Enemy 3D Model → ${displayName}`;
+    } else {
+      const existingCustom = this.playerRig.bodyPivot.getObjectByName('custom_gltf_hero');
+      if (existingCustom) {
+        this.playerRig.bodyPivot.remove(existingCustom);
+      }
+      model.name = 'custom_gltf_hero';
+      this.playerRig.bodyPivot.add(model);
+      this.statusBanner = `Hot-Swapped Samurai 3D Model → ${displayName}`;
+    }
+    this.pushFloatingText(`3D GLB LOADED: ${displayName.toUpperCase()}`, this.playerPos, '#38bdf8', true);
+  }
+
+  // ============================================================================
+  // SEAMLESS INFINITE OPEN-WORLD INITIALIZATION (ZERO STATIC ROAD RECTANGLES OR CONES)
   // ============================================================================
   public loadStage(stageIdx: number) {
     this.stageIndex = ((stageIdx % CAMPAIGN_STAGES.length) + CAMPAIGN_STAGES.length) % CAMPAIGN_STAGES.length;
@@ -613,7 +975,7 @@ export class SamuraiEngine {
     this.aiBrain.setLearningMultiplier(stage.boss.aiLearningRate);
 
     this.scene.background = new THREE.Color(stage.skyColor);
-    this.scene.fog = new THREE.FogExp2(stage.fogColor, stage.fogDensity);
+    this.scene.fog = new THREE.FogExp2(stage.fogColor, 0.0045);
 
     const keyLight = this.scene.getObjectByName('keyLight') as THREE.DirectionalLight;
     if (keyLight) keyLight.color.setHex(stage.keyLightColor);
@@ -641,189 +1003,136 @@ export class SamuraiEngine {
     this.sliceableBamboos = [];
     this.grassInstancedMesh = null;
     this.grassBaseCoords = [];
+    this.spawnedChunkKeys.clear();
+    this.spawnedChunkKeys.add('0:0');
+    this.multiPhysics.clearPropEntries(this.scene);
 
-    // 1. Multi-Octave FBM Terrain Plane (96x96 segments) with Riverbed & Mountain Ridges
-    const groundGeo = new THREE.PlaneGeometry(180, 180, 96, 96);
-    const posAttr = groundGeo.attributes.position;
-    for (let i = 0; i < posAttr.count; i++) {
-      const vx = posAttr.getX(i);
-      const vy = posAttr.getY(i);
-      const distFromArena = Math.max(0, Math.hypot(vx, vy) - 24.5);
-      if (distFromArena > 0) {
-        const n1 = Math.sin(vx * 0.08) * Math.cos(vy * 0.08) * 2.2;
-        const n2 = Math.sin(vx * 0.19 + 1.4) * Math.sin(vy * 0.17) * 0.9;
-        const n3 = Math.cos(vx * 0.37 - vy * 0.31) * 0.35;
-        const elevation = Math.min(8.8, distFromArena * 0.18 * (1.2 + n1 + n2 + n3));
-        posAttr.setZ(i, Math.max(0, elevation));
-      }
+    // Spawn Destructible Wooden Crates (Kibako) & Hanging Verlet Temple Banner in Cannon-es World
+    const crateGeo = createSplineLatheGeometry(
+      [
+        [0.02, 0.0],
+        [0.44, 0.02],
+        [0.46, 0.42],
+        [0.44, 0.84],
+        [0.02, 0.86],
+      ],
+      8
+    );
+    const crateMat = createSumiWashiMaterial(0x785233, 0.78, 0.08, this.textures);
+    for (const [cx, cz] of [
+      [-6.2, 6.5],
+      [6.2, 6.5],
+      [-6.8, -4.0],
+      [6.8, -4.0],
+    ]) {
+      const crateMesh = new THREE.Mesh(crateGeo, crateMat);
+      crateMesh.castShadow = !this.isSoftwareGl;
+      crateMesh.receiveShadow = true;
+      this.scene.add(crateMesh);
+      this.multiPhysics.addRigidBodyMesh(
+        crateMesh,
+        new CANNON.Box(new CANNON.Vec3(0.42, 0.43, 0.42)),
+        12,
+        { x: cx, y: 0.45, z: cz },
+        { x: 0, y: 0, z: 0 },
+        { x: 0, y: 0, z: 0 },
+        999,
+        true,
+        'crate',
+        40
+      );
     }
-    groundGeo.computeVertexNormals();
 
-    const groundMat = new THREE.MeshStandardMaterial({
-      color: stage.groundColor,
-      roughness: 0.84,
-      metalness: 0.06,
-      normalMap: this.textures.washiNormal,
-      normalScale: new THREE.Vector2(0.35, 0.35),
-      bumpMap: this.textures.washiBump,
-      bumpScale: 0.05,
-    });
-    const ground = new THREE.Mesh(groundGeo, groundMat);
-    ground.rotation.x = -Math.PI / 2;
-    ground.receiveShadow = true;
-    this.envGroup.add(ground);
+    // Hanging Temple Banner with Real-Time 3D Verlet Cloth Integration
+    const bannerMat = createSumiWashiMaterial(0x991b1b, 0.65, 0.1, this.textures);
+    bannerMat.side = THREE.DoubleSide;
+    this.bannerVerletCloth = new VerletClothSheet(1.15, 2.2, 6, 8, bannerMat);
+    this.bannerVerletCloth.mesh.position.set(-3.4, 4.8, -17.7);
+    this.envGroup.add(this.bannerVerletCloth.mesh);
 
-    // 2. Central Flagstone Path & Stepping Stones (Tobi-ishi)
-    const pathGeo = new THREE.PlaneGeometry(7.5, 58);
-    const pathMat = new THREE.MeshStandardMaterial({
-      color: stage.secondaryGroundColor,
-      roughness: 0.76,
-      metalness: 0.1,
-      bumpMap: this.textures.washiBump,
-      bumpScale: 0.03,
-    });
-    const pathMesh = new THREE.Mesh(pathGeo, pathMat);
-    pathMesh.rotation.x = -Math.PI / 2;
-    pathMesh.position.set(0, 0.02, -4);
-    pathMesh.receiveShadow = true;
-    this.envGroup.add(pathMesh);
-
-    // 3. Sacred Torii Spirit Portal at z = -18 (Run through or grapple to warp to next Biome!)
+    // Sacred Torii Shrine Landmark at z = -18
     const toriiGroup = this.buildToriiLandmark(stage);
-    toriiGroup.position.set(0, 0, -18);
+    const toriiY = this.openWorld.getGroundAndBridgeHeightAt(0, -18);
+    toriiGroup.position.set(0, toriiY, -18);
     this.envGroup.add(toriiGroup);
 
-    // Distant Hyperbolic Catenary Pagoda Roof Silhouette at z = -34
+    // Distant Hyperbolic Catenary Pagoda Roof Shrine Silhouette at z = -34
     const pagodaRoofGeo = createIrimoyaPagodaRoofGeometry(12.5, 10.5, 4.2, 24);
     const pagodaMat = createUrushiLacquerMaterial(0x271c19, this.textures, false);
     const pagodaRoof = new THREE.Mesh(pagodaRoofGeo, pagodaMat);
-    pagodaRoof.position.set(0, 5.5, -34);
+    pagodaRoof.position.set(0, this.openWorld.getGroundAndBridgeHeightAt(0, -34) + 5.5, -34);
     this.envGroup.add(pagodaRoof);
 
-    // 4. Flanking Stone Lanterns (Toro) + Koi Pond Water Ripple Basin
+    // Flanking Carved Stone Lanterns (Toro)
     for (const side of [-4.8, 4.8]) {
       for (const zPos of [4, -8]) {
         const lantern = this.buildStoneLantern(stage);
-        lantern.position.set(side, 0, zPos);
+        lantern.position.set(side, this.openWorld.getGroundAndBridgeHeightAt(side, zPos), zPos);
         this.envGroup.add(lantern);
       }
     }
 
-    // 5. Interactive Sliceable Bamboo Stalks inside Arena Perimeter (Can be cut in half!)
-    const bambooGeo = createSplineLatheGeometry(
-      [
-        [0.14, 0],
-        [0.13, 1.4],
-        [0.15, 1.45],
-        [0.12, 2.9],
-        [0.14, 2.95],
-        [0.11, 4.4],
-      ],
-      20
-    );
-    const bambooMat = createSumiWashiMaterial(0x2d5a27, 0.58, 0.12, this.textures);
+    // Interactive Sliceable Nodal Bamboo Stalks (Can be cut in half via Zandatsu Planar Mesh Slicing!)
+    const bambooGeo = createSegmentedBambooWithNodesGeometry(4.8);
+    const bambooMat = createSumiWashiMaterial(0x2d5a27, 0.54, 0.1, this.textures);
     for (let b = 0; b < 14; b++) {
       const ang = (b / 14) * Math.PI * 2 + 0.25;
       const rad = 16.5 + (b % 3) * 2.2;
       const bx = Math.cos(ang) * rad;
       const bz = Math.sin(ang) * rad - 2;
       if (Math.abs(bx) < 5.5) continue;
+      const by = this.openWorld.getGroundAndBridgeHeightAt(bx, bz);
       const bambooMesh = new THREE.Mesh(bambooGeo, bambooMat);
-      bambooMesh.position.set(bx, 0, bz);
+      bambooMesh.position.set(bx, by, bz);
       bambooMesh.castShadow = !this.isSoftwareGl;
       this.envGroup.add(bambooMesh);
       this.sliceableBamboos.push({
         mesh: bambooMesh,
-        pos: new THREE.Vector3(bx, 0, bz),
+        pos: new THREE.Vector3(bx, by, bz),
         sliced: false,
       });
     }
 
-    // 6. GPU-Instanced Interactive Susuki Pampas Grass Clusters (Bends away from Samurai & Slashes!)
-    const grassCount = 160;
-    const bladeGeo = new THREE.ConeGeometry(0.11, 1.15, 5);
-    bladeGeo.translate(0, 0.57, 0);
-    const grassMat = createSumiWashiMaterial(
-      stage.environmentType === 'bamboo_forest' ? 0x4d7c3f : 0xa18862,
-      0.72,
-      0.08,
-      this.textures
-    );
-    this.grassInstancedMesh = new THREE.InstancedMesh(bladeGeo, grassMat, grassCount);
+    // GPU-Instanced Interactive Multi-Blade Curved Grass Clumps (ZERO ConeGeometry!)
+    const grassCount = 120;
+    const multiBladeClumpGeo = createMultiBladeGrassClumpGeometry(9);
+    const grassMat = createSumiWashiMaterial(0x3f7a38, 0.66, 0.06, this.textures);
+    grassMat.side = THREE.DoubleSide;
+    this.grassInstancedMesh = new THREE.InstancedMesh(multiBladeClumpGeo, grassMat, grassCount);
     this.grassInstancedMesh.frustumCulled = false;
     for (let g = 0; g < grassCount; g++) {
       const a = (g / grassCount) * Math.PI * 2 + (g % 7) * 0.19;
-      const r = 7.5 + (g % 11) * 1.45;
+      const r = 7.5 + (g % 11) * 1.65;
       let gx = Math.cos(a) * r;
       const gz = Math.sin(a) * r - 2;
       if (Math.abs(gx) < 4.4) gx += gx < 0 ? -4.8 : 4.8;
-      const gs = 0.75 + (g % 4) * 0.18;
+      const gs = 0.85 + (g % 4) * 0.22;
       const gyaw = (g * 1.3) % (Math.PI * 2);
       this.grassBaseCoords.push({ x: gx, z: gz, scale: gs, yaw: gyaw });
     }
     this.updateInteractiveGrass(0);
     this.envGroup.add(this.grassInstancedMesh);
 
-    // 7. InstancedMesh Natural Perimeter Grove (> 80 instances)
-    const count = 84;
-    const propGeo =
-      stage.environmentType === 'bamboo_forest'
-        ? new THREE.CylinderGeometry(0.18, 0.24, 9.5, 12)
-        : stage.environmentType === 'zen_garden'
-          ? new THREE.DodecahedronGeometry(1.6, 1)
-          : new THREE.CylinderGeometry(0.45, 0.55, 6.5, 16);
-
-    const propMat = createSumiWashiMaterial(
-      stage.environmentType === 'bamboo_forest'
-        ? 0x2d4c2b
-        : stage.environmentType === 'burning_castle'
-          ? 0x271c19
-          : stage.environmentType === 'origami_shrine'
-            ? 0x991b1b
-            : stage.environmentType === 'blood_battlefield'
-              ? 0x3f1d24
-              : 0x57534e,
-      0.65,
-      0.15,
-      this.textures
-    );
-
-    const instanced = new THREE.InstancedMesh(propGeo, propMat, count);
-    instanced.castShadow = !this.isSoftwareGl;
-    instanced.receiveShadow = true;
-    instanced.instanceColor = new THREE.InstancedBufferAttribute(
-      new Float32Array(count * 3),
-      3
-    );
-
-    for (let i = 0; i < count; i++) {
-      const angle = (i / count) * Math.PI * 2 + (i % 3) * 0.08;
-      const radius = 25 + (i % 4) * 3.8;
-      let x = Math.cos(angle) * radius;
-      const z = Math.sin(angle) * radius - 3;
-      if (z > 10 && Math.abs(x) < 16) {
-        x += x <= 0 ? -14 : 14;
-      }
-      const scale = 0.85 + (i % 5) * 0.08;
-
-      this._v1.set(x, stage.environmentType === 'zen_garden' ? 1.1 * scale : 4.2 * scale, z);
-      this._euler.set(((i % 3) - 1) * 0.04, (i * 0.7) % Math.PI, ((i % 2) - 0.5) * 0.04);
-      this._quat.setFromEuler(this._euler);
-      this._v2.set(scale, scale, scale);
-      this._mat4.compose(this._v1, this._quat, this._v2);
-      instanced.setMatrixAt(i, this._mat4);
-
-      const tint = 0.86 + (i % 4) * 0.08;
-      this._color.setRGB(tint, tint, tint);
-      instanced.setColorAt(i, this._color);
+    // Gnarled Japanese Matsu Pine & Momiji Maple Perimeter Trees (ZERO bare CylinderGeometry!)
+    for (let t = 0; t < 12; t++) {
+      const angle = (t / 12) * Math.PI * 2 + 0.18;
+      const radius = 22.0 + (t % 3) * 4.5;
+      let tx = Math.cos(angle) * radius;
+      const tz = Math.sin(angle) * radius - 3;
+      if (Math.abs(tx) < 6.5) tx += tx < 0 ? -7.5 : 7.5;
+      const ty = this.openWorld.getGroundAndBridgeHeightAt(tx, tz);
+      const style = t % 3 === 0 ? 'momiji_maple' : t % 3 === 1 ? 'matsu_pine' : 'sakura_cherry';
+      const treeGrp = buildGnarledJapaneseTree(style, this.textures);
+      treeGrp.position.set(tx, ty, tz);
+      treeGrp.rotation.y = angle + 1.2;
+      const sc = 0.85 + (t % 3) * 0.15;
+      treeGrp.scale.setScalar(sc);
+      this.envGroup.add(treeGrp);
     }
-    instanced.instanceMatrix.needsUpdate = true;
-    instanced.instanceColor.needsUpdate = true;
-    instanced.computeBoundingSphere();
-    this.envGroup.add(instanced);
 
-    // Reset Player Position on Clear Open Path facing Landmark
-    this.playerPos.set(0, 0, 14);
+    // Reset Player Position on Open Shrine Glade facing North (-Z)
+    const startY = this.openWorld.getGroundAndBridgeHeightAt(0, 14);
+    this.playerPos.set(0, startY, 14);
     this.playerVel.set(0, 0, 0);
     this.playerYaw = Math.PI;
     this.hp = this.stats.maxHp;
@@ -834,7 +1143,17 @@ export class SamuraiEngine {
     this.throwableStock = this.equippedThrowable.maxStock;
     this.bossSpawnedInStage = false;
     this.portalCooldown = 2.5;
-    this.statusBanner = `Biome ${this.stageIndex + 1}/10 · ${stage.name} (${stage.kanji})`;
+
+    // Rebuild 5x5 (80m x 80m) Dynamic Open-World Chunk Grid around player
+    this.lastOpenWorldTelemetry = this.openWorld.updateStreamedWorld(
+      this.playerPos,
+      this.runTimeSec,
+      this.textures.washiNormal,
+      this.textures.washiBump,
+      undefined,
+      (cx, cz, wx, wz, biome) => this.spawnOpenWorldChunkEntities(cx, cz, wx, wz, biome)
+    );
+    this.statusBanner = `${this.lastOpenWorldTelemetry.currentBiome.name} (${this.lastOpenWorldTelemetry.currentBiome.kanji}) · [V] ${CAMERA_MODE_LABELS[this.cameraMode]}`;
 
     this.spawnStageWave(stage);
 
@@ -844,6 +1163,111 @@ export class SamuraiEngine {
     this.broadcastHUD(true);
   }
 
+  /**
+   * Deterministically spawns roaming Ronin patrols, Yokai packs, and World Bosses
+   * as the player walks infinitely in ANY 360° direction into new 80m x 80m chunks.
+   */
+  private spawnOpenWorldChunkEntities(
+    cx: number,
+    cz: number,
+    chunkWorldCenterX: number,
+    chunkWorldCenterZ: number,
+    biome: OpenWorldBiomeDefinition
+  ) {
+    if (this.isDojoMode || (cx === 0 && cz === 0)) return;
+    const key = `${cx}:${cz}`;
+    if (this.spawnedChunkKeys.has(key)) return;
+    this.spawnedChunkKeys.add(key);
+
+    // Cap active AI entities for rock-solid 60 FPS
+    const aliveEnemies = this.enemies.filter((e) => e.state !== 'ko');
+    if (aliveEnemies.length >= 16) return;
+
+    const archetypeKeys = Object.keys(ENEMY_ARCHETYPES) as (keyof typeof ENEMY_ARCHETYPES)[];
+    const seed = Math.floor(hash2D(cx * 37, cz * 59) * 1000);
+    const patrolCount = 2 + (seed % 2);
+    const localCenterX = cx * this.openWorld.chunkSize;
+    const localCenterZ = cz * this.openWorld.chunkSize;
+
+    for (let i = 0; i < patrolCount; i++) {
+      const archKey = archetypeKeys[(seed + i * 3) % archetypeKeys.length];
+      const arch = ENEMY_ARCHETYPES[archKey];
+      const offsetX = (hash2D(cx * 17 + i, cz * 29 + i) - 0.5) * 36;
+      const offsetZ = (hash2D(cx * 43 + i, cz * 71 + i) - 0.5) * 36;
+      const sx = localCenterX + offsetX;
+      const sz = localCenterZ + offsetZ;
+      const sy = this.openWorld.getGroundAndBridgeHeightAt(sx, sz);
+
+      const sampleWeapon = WEAPONS.find((w) => w.id === arch.weaponType) || WEAPONS[0];
+      const rig = createEnemyMeshRig(arch, false, this.textures, sampleWeapon);
+      rig.root.position.set(sx, sy, sz);
+      this.scene.add(rig.root);
+
+      this.enemies.push({
+        id: this.nextEnemyId++,
+        name: `${biome.kanji} ${arch.name}`,
+        isBoss: false,
+        archetype: arch,
+        rig,
+        pos: new THREE.Vector3(sx, sy, sz),
+        vel: new THREE.Vector3(),
+        hp: arch.hp,
+        maxHp: arch.hp,
+        posture: 0,
+        maxPosture: arch.posture,
+        state: 'approach',
+        stateTimer: 0.5 + i * 0.3,
+        windupDuration: arch.windupSec,
+        hyperArmorActive: false,
+        poisonTimer: 0,
+        slowTimer: 0,
+        burnTimer: 0,
+        strafeSign: i % 2 === 0 ? 1 : -1,
+        specialCooldown: 3.5,
+        hitFlashTimer: 0,
+      });
+    }
+
+    // Spawn a Roaming Province World Boss in landmark citadel chunks when no boss is currently alive
+    const hasAliveBoss = this.enemies.some((e) => e.isBoss && e.state !== 'ko');
+    if (!hasAliveBoss && (Math.abs(cx) + Math.abs(cz)) % 2 === 0 && hash2D(chunkWorldCenterX, chunkWorldCenterZ) > 0.35) {
+      const stageForChunk = CAMPAIGN_STAGES[Math.abs(cx * 3 + cz * 7) % CAMPAIGN_STAGES.length];
+      const boss = stageForChunk.boss;
+      const sampleWeapon = WEAPONS.find((w) => w.id === boss.weaponTypes[0]) || WEAPONS[1];
+      const rig = createEnemyMeshRig(boss, true, this.textures, sampleWeapon);
+      const bx = localCenterX;
+      const bz = localCenterZ;
+      const by = this.openWorld.getGroundAndBridgeHeightAt(bx, bz);
+      const spawnPos = new THREE.Vector3(bx, by, bz);
+      rig.root.position.copy(spawnPos);
+      this.scene.add(rig.root);
+
+      this.enemies.push({
+        id: this.nextEnemyId++,
+        name: boss.name,
+        isBoss: true,
+        bossDef: boss,
+        rig,
+        pos: spawnPos,
+        vel: new THREE.Vector3(),
+        hp: boss.hp,
+        maxHp: boss.hp,
+        posture: 0,
+        maxPosture: boss.posture,
+        state: 'approach',
+        stateTimer: 0.6,
+        windupDuration: 0.55,
+        hyperArmorActive: false,
+        poisonTimer: 0,
+        slowTimer: 0,
+        burnTimer: 0,
+        strafeSign: 1,
+        specialCooldown: 4.5,
+        hitFlashTimer: 0,
+      });
+    }
+  }
+
   private updateInteractiveGrass(timeSec: number) {
     if (!this.grassInstancedMesh) return;
     for (let i = 0; i < this.grassBaseCoords.length; i++) {
@@ -851,13 +1275,14 @@ export class SamuraiEngine {
       const dx = g.x - this.playerPos.x;
       const dz = g.z - this.playerPos.z;
       const dist = Math.hypot(dx, dz);
-      // Grass bends away from player position and sways in wind
-      const bendStrength = dist < 2.6 ? (1 - dist / 2.6) * 0.85 : 0;
+      // Multi-blade grass bends away from player position and sways in wind
+      const bendStrength = dist < 2.8 ? (1 - dist / 2.8) * 0.78 : 0;
       const windTilt = Math.sin(timeSec * 2.4 + g.x * 0.35 + g.z * 0.25) * 0.14;
       const tiltX = (dz / Math.max(0.1, dist)) * bendStrength + windTilt;
       const tiltZ = -(dx / Math.max(0.1, dist)) * bendStrength + windTilt * 0.5;
+      const gy = this.openWorld.getGroundAndBridgeHeightAt(g.x, g.z);
 
-      this._v1.set(g.x, 0, g.z);
+      this._v1.set(g.x, gy, g.z);
       this._euler.set(tiltX, g.yaw, tiltZ);
       this._quat.setFromEuler(this._euler);
       this._v2.set(g.scale, g.scale, g.scale);
@@ -1083,7 +1508,10 @@ export class SamuraiEngine {
       WEAPONS.find((w) => w.id === boss.weaponTypes[0]) || WEAPONS[1];
     const rig = createEnemyMeshRig(boss, true, this.textures, sampleWeapon);
 
-    const spawnPos = new THREE.Vector3(0, 0, -14);
+    const bx = this.playerPos.x + Math.sin(this.playerYaw) * 14;
+    const bz = this.playerPos.z + Math.cos(this.playerYaw) * 14;
+    const by = this.openWorld.getGroundAndBridgeHeightAt(bx, bz);
+    const spawnPos = new THREE.Vector3(bx, by, bz);
     rig.root.position.copy(spawnPos);
     this.scene.add(rig.root);
 
@@ -1114,7 +1542,116 @@ export class SamuraiEngine {
     this.statusBanner = `BOSS AWAKENED: ${boss.name} (${boss.kanjiSubtitle})`;
     this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.55);
     this.audio.playHitImpact(true);
+    this.audio.playYokaiRoarFormant('oni', spawnPos, this.playerPos);
+    this.triggerJapaneseBattleCallout('boss_challenge', spawnPos);
     this.broadcastHUD(true);
+  }
+
+  // ============================================================================
+  // INTERACTIVE COMBO DOJO, NANO BANANA PRO PBR FORGE & JAPANESE VOICE API
+  // ============================================================================
+  public toggleDojoOverlay(forceState?: boolean) {
+    const nextState = forceState !== undefined ? forceState : !this.comboDojo.trainerOpen;
+    this.comboDojo.setTrainerOpen(nextState);
+    this.lastDojoSnapshot = this.comboDojo.stepGhostMasterAndTelemetry(
+      0,
+      this.playerPos,
+      this.playerYaw,
+      null,
+      this.runTimeSec
+    );
+    if (this.comboDojo.trainerOpen) {
+      this.statusBanner = '稽古道場 Interactive Combo Dojo · Holographic Ghost Master Active';
+      this.audio.playKiaiVocalFormant('kuji_in', this.playerPos, this.playerPos);
+    }
+    this.broadcastHUD(true);
+  }
+
+  public selectDojoLesson(lessonIndex: number) {
+    this.comboDojo.selectLesson(lessonIndex);
+    this.lastDojoSnapshot = this.comboDojo.stepGhostMasterAndTelemetry(
+      0,
+      this.playerPos,
+      this.playerYaw,
+      null,
+      this.runTimeSec
+    );
+    this.broadcastHUD(true);
+  }
+
+  public toggleGhostSlowMotion() {
+    this.comboDojo.ghostMasterSlowMoSpeed =
+      this.comboDojo.ghostMasterSlowMoSpeed < 0.6 ? 1.0 : 0.45;
+    this.lastDojoSnapshot = this.comboDojo.stepGhostMasterAndTelemetry(
+      0,
+      this.playerPos,
+      this.playerYaw,
+      null,
+      this.runTimeSec
+    );
+    this.broadcastHUD(true);
+  }
+
+  public triggerJapaneseBattleCallout(
+    dialogueId: keyof typeof BILINGUAL_BATTLE_DIALOGUES,
+    sourcePos?: THREE.Vector3
+  ) {
+    const dlg = BILINGUAL_BATTLE_DIALOGUES[dialogueId];
+    if (!dlg) return;
+    this.activeDialogueSubtitle = dlg;
+    this.dialogueTimer = 4.2;
+    this.audio.speakJapaneseBattleLine(
+      dlg.romaji,
+      dlg.japaneseKanji,
+      dlg.category === 'boss_challenge' ? 0.65 : 0.85,
+      1.04,
+      sourcePos || this.playerPos,
+      this.playerPos
+    );
+    this.broadcastHUD(true);
+  }
+
+  public async generateAndApplyNanoBananaPBR(
+    presetId: NanoBananaPresetId,
+    customPrompt?: string
+  ): Promise<SobelPBRMapBundle> {
+    const bundle = await synthesizeNanoBananaPBRBundle(presetId, customPrompt);
+    if (this.activePbrBundle) {
+      this.activePbrBundle.albedoTex.dispose();
+      this.activePbrBundle.normalTex.dispose();
+      this.activePbrBundle.heightTex.dispose();
+      this.activePbrBundle.roughnessTex.dispose();
+    }
+    this.activePbrBundle = bundle;
+    this.applyActivePBRBundleToMeshSlot(bundle);
+    const preset =
+      NANO_BANANA_PBR_PRESETS.find((p) => p.id === bundle.presetId) ||
+      NANO_BANANA_PBR_PRESETS[0];
+    this.statusBanner = `Applied 4-Map POM Material: ${preset.name} (${bundle.sourceModel})`;
+    this.pushFloatingText(`4-MAP PBR + POM APPLIED: ${preset.name.toUpperCase()}`, this.playerPos, '#38bdf8', true);
+    this.broadcastHUD(true);
+    return bundle;
+  }
+
+  private applyActivePBRBundleToMeshSlot(bundle: SobelPBRMapBundle) {
+    const preset =
+      NANO_BANANA_PBR_PRESETS.find((p) => p.id === bundle.presetId) ||
+      NANO_BANANA_PBR_PRESETS[0];
+    const targetRoot =
+      preset.targetCategory === 'weapon'
+        ? this.playerRig?.weaponMount
+        : preset.targetCategory === 'armor'
+          ? this.playerRig?.torsoGroup
+          : this.envGroup;
+    if (!targetRoot) return;
+
+    targetRoot.traverse((obj) => {
+      const mesh = obj as THREE.Mesh;
+      if (mesh.isMesh && mesh.material && (mesh.material as THREE.MeshStandardMaterial).isMeshStandardMaterial) {
+        const stdMat = mesh.material as THREE.MeshStandardMaterial;
+        applyPOMAndTriplanarMaterial(stdMat, bundle, preset.pomDepthScale, preset.normalStrength * 0.45);
+      }
+    });
   }
 
   // ============================================================================
@@ -1180,7 +1717,15 @@ export class SamuraiEngine {
 
     this.playerPos.set(0, 0, 12.6);
     this.playerYaw = Math.PI;
-    this.statusBanner = 'Dojo Training Mode · 稽古道場 (Stationary Parry & Combo Dummy)';
+    this.comboDojo.setTrainerOpen(true);
+    this.lastDojoSnapshot = this.comboDojo.stepGhostMasterAndTelemetry(
+      0,
+      this.playerPos,
+      this.playerYaw,
+      null,
+      this.runTimeSec
+    );
+    this.statusBanner = 'Dojo Training Mode · 稽古道場 (7-Lesson Curriculum & Ghost Master Active)';
     this.gameState = 'playing';
     document.body.dataset.state = 'playing';
     this.keysHeld.clear();
@@ -1286,6 +1831,14 @@ export class SamuraiEngine {
   private bindEvents() {
     const onKeyDown = (e: KeyboardEvent) => {
       const code = e.code;
+      const targetTag = (e.target as HTMLElement)?.tagName;
+      if (targetTag === 'INPUT' || targetTag === 'TEXTAREA' || targetTag === 'SELECT') return;
+
+      if (code === 'KeyV' && !this.customizerMode) {
+        e.preventDefault();
+        this.cycleCameraMode();
+        return;
+      }
       if (this.gameState === 'title' && !this.customizerMode && (code === 'Enter' || code === 'Space')) {
         e.preventDefault();
         this.startGame();
@@ -1691,38 +2244,122 @@ export class SamuraiEngine {
       return;
     }
 
-    const isPlunge = !this.isGrounded && this.playerPos.y > 0.8;
+    const isPlunge = !this.isGrounded && this.playerPos.y > 0.65;
+    const isForwardSprintThrust =
+      (this.keysHeld.has('KeyW') || this.keysHeld.has('ArrowUp')) &&
+      (this.keysHeld.has('ShiftLeft') || this.keysHeld.has('ShiftRight'));
+
+    // Select exact move from the 6-Move Combat System per Weapon:
+    if (isPlunge) {
+      this.activeCombatMove = 'kabuto_wari'; // Move 6: Space + LMB Mid-Air Helm-Splitter
+    } else if (isForwardSprintThrust) {
+      this.activeCombatMove = 'tsuki_lunge'; // Move 5: W + Shift + LMB Armor-Piercing Thrust
+    } else if (isHeavy) {
+      this.activeCombatMove = 'iaijutsu_charged'; // Move 4: Hold LMB Charged Signature Technique
+    } else if (this.comboStep === 1) {
+      this.activeCombatMove = 'kesa_giri'; // Move 1: Tap LMB Strike 1 (45° Downward Cleave)
+    } else if (this.comboStep === 2) {
+      this.activeCombatMove = 'gyaku_kesa'; // Move 2: Combo LMB Strike 2 (Rising Reverse Guard-Break)
+    } else {
+      this.activeCombatMove = 'tsumuji_kaze'; // Move 3: Combo LMB Strike 3 (360° Whirlwind Finisher)
+    }
+
+    const moveDef = SIX_COMBAT_MOVES[this.activeCombatMove];
+    this.activeMoveDuration = moveDef.durationSec;
+    this.attackAnimTimer = moveDef.durationSec;
+
     const dmgMult =
-      (isShadowCross ? 2.15 : isPlunge ? 1.85 : isHeavy ? 1.65 : 1.0 + this.comboStep * 0.12) *
-      infDef.bonusDamageMult;
+      (isShadowCross ? 2.15 : moveDef.damageMultiplier) * infDef.bonusDamageMult;
     const finalBaseDmg = Math.round(this.stats.attackPower * dmgMult);
     const finalPostureDmg = Math.round(
-      this.stats.postureBreakPower * (isHeavy || isShadowCross ? 1.75 : 1.0)
+      this.stats.postureBreakPower * (isShadowCross ? 1.85 : moveDef.postureDamageMultiplier)
     );
 
     this.aiBrain.recordMeleeAttack(nowMs, finalBaseDmg);
-    this.audio.playSwordSlash(isHeavy || isPlunge || isShadowCross);
+    this.audio.playSwordSlash(isHeavy || isPlunge || isShadowCross || this.activeCombatMove === 'tsumuji_kaze');
+    if (isHeavy || isPlunge || this.activeCombatMove === 'tsumuji_kaze') {
+      this.audio.playKiaiVocalFormant(
+        this.activeCombatMove === 'iaijutsu_charged' ? 'zandatsu' : 'teyaa',
+        this.playerPos,
+        this.playerPos
+      );
+    } else if (this.comboStep === 1) {
+      this.audio.playKiaiVocalFormant('ha', this.playerPos, this.playerPos);
+    } else {
+      this.audio.playKiaiVocalFormant('sei', this.playerPos, this.playerPos);
+    }
 
-    this.spawnInkSlashArc(weapon, isHeavy || isPlunge || isShadowCross);
+    // Record move in Interactive Combo Dojo Trainer
+    const dojoRes = this.comboDojo.recordPlayerMoveExecution(
+      this.activeCombatMove,
+      this.comboDojo.frameCursorNormalized,
+      finalBaseDmg,
+      finalPostureDmg,
+      nowMs * 0.001
+    );
+    if (dojoRes.newlyUnlockedScroll) {
+      this.pushFloatingText(`秘伝 SCROLL UNLOCKED: ${dojoRes.newlyUnlockedScroll}`, this.playerPos, '#fbbf24', true);
+    }
 
-    this.playerPos.x += Math.sin(this.playerYaw) * 0.55;
-    this.playerPos.z += Math.cos(this.playerYaw) * 0.55;
+    this.spawnInkSlashArc(weapon, isHeavy || isPlunge || isShadowCross || this.activeCombatMove === 'tsumuji_kaze');
 
-    // Slice any interactive Bamboo Stalks within blade reach!
-    this.checkSliceableBambooHit(weapon.reach + 0.9);
+    // Root-motion forward momentum from Cubic Hermite Spline move definition
+    const rootStep = Math.min(1.45, moveDef.rootMotionForwardImpulse * 0.085);
+    this.playerPos.x += Math.sin(this.playerYaw) * rootStep;
+    this.playerPos.z += Math.cos(this.playerYaw) * rootStep;
+
+    // Move 6 Kabuto-Wari Plunge triggers a radial Cannon-es physics shockwave on landing!
+    if (this.activeCombatMove === 'kabuto_wari') {
+      this.playerVel.y = -24.0;
+      this.multiPhysics.applyRadialShockwave(this.playerPos, 5.5, 65);
+    }
+
+    // Swirl nearby Sakura petals in the 3D wind vector field from sword vortex!
+    this.applySwordVortexToPetals(weapon.reach + 1.5);
+
+    // Slice any interactive Bamboo Stalks & Destructible Cannon-es Crates using Zandatsu Planar Mesh Bisection!
+    this.checkSliceableBambooHit(weapon.reach + 0.9, moveDef.cuttingPlaneNormalLocal);
 
     const reach =
       weapon.reach *
-      (isHeavy || isPlunge || this.activeInfusion === 'fujin_gale' ? 1.35 : 1.05);
+      (isHeavy || isPlunge || this.activeCombatMove === 'tsuki_lunge' || this.activeInfusion === 'fujin_gale'
+        ? 1.38
+        : 1.08);
     const halfArcRad =
       THREE.MathUtils.degToRad(
-        isHeavy || isPlunge || weapon.id === 'otsuchi'
-          ? Math.min(360, weapon.swingArcDeg * 1.35)
-          : weapon.swingArcDeg
+        this.activeCombatMove === 'tsumuji_kaze'
+          ? 360
+          : isHeavy || isPlunge || weapon.id === 'otsuchi'
+            ? Math.min(360, weapon.swingArcDeg * 1.35)
+            : weapon.swingArcDeg
       ) * 0.5;
 
     const forwardX = Math.sin(this.playerYaw);
     const forwardZ = Math.cos(this.playerYaw);
+
+    // Cast 8 Blade Rays from Tsuba (s = 0) to Kissaki (s = 1) along the swing arc
+    const prevTsuba = {
+      x: this.playerPos.x - Math.cos(this.playerYaw) * 0.35,
+      y: this.playerPos.y + 1.15,
+      z: this.playerPos.z + Math.sin(this.playerYaw) * 0.35,
+    };
+    const prevKissaki = {
+      x: prevTsuba.x + Math.sin(this.playerYaw - halfArcRad * 0.7) * reach,
+      y: this.playerPos.y + 1.35,
+      z: prevTsuba.z + Math.cos(this.playerYaw - halfArcRad * 0.7) * reach,
+    };
+    const currTsuba = {
+      x: this.playerPos.x + Math.cos(this.playerYaw) * 0.35,
+      y: this.playerPos.y + 1.05,
+      z: this.playerPos.z - Math.sin(this.playerYaw) * 0.35,
+    };
+    const currKissaki = {
+      x: currTsuba.x + Math.sin(this.playerYaw + halfArcRad * 0.7) * reach,
+      y: this.playerPos.y + 0.95,
+      z: currTsuba.z + Math.cos(this.playerYaw + halfArcRad * 0.7) * reach,
+    };
+    const eightRays = generateEightBladeRays(prevTsuba, prevKissaki, currTsuba, currKissaki);
+    this.lastBladeRayHits = eightRays.length;
 
     let hitAny = false;
     for (const enemy of this.enemies) {
@@ -1730,14 +2367,15 @@ export class SamuraiEngine {
       const dx = enemy.pos.x - this.playerPos.x;
       const dz = enemy.pos.z - this.playerPos.z;
       const dist = Math.hypot(dx, dz);
-      if (dist > reach + 0.85) continue;
+      if (dist > reach + 0.95) continue;
 
       const dirX = dx / Math.max(0.001, dist);
       const dirZ = dz / Math.max(0.001, dist);
       const dot = forwardX * dirX + forwardZ * dirZ;
       const angle = Math.acos(THREE.MathUtils.clamp(dot, -1, 1));
+      const rayCheck = checkEightBladeRayHit(eightRays, enemy.pos, 1.05);
 
-      if (angle <= halfArcRad || dist < 1.35) {
+      if (rayCheck.hit || angle <= halfArcRad || dist < 1.35) {
         hitAny = true;
         this.applyElementalInfusionOnHit(enemy);
         this.applyDamageToEnemy(
@@ -1745,7 +2383,7 @@ export class SamuraiEngine {
           finalBaseDmg,
           finalPostureDmg,
           weapon.bleedBuildup,
-          isHeavy || isPlunge || isShadowCross,
+          isHeavy || isPlunge || isShadowCross || this.activeCombatMove !== 'kesa_giri',
           isShadowCross
         );
       }
@@ -1754,6 +2392,23 @@ export class SamuraiEngine {
     if (hitAny) {
       this.hitstopTimer = isHeavy || isPlunge ? 0.065 : 0.032;
       this.cameraTrauma = Math.min(1, this.cameraTrauma + (isHeavy ? 0.38 : 0.18));
+    }
+  }
+
+  private applySwordVortexToPetals(radius: number) {
+    const fwdX = Math.sin(this.playerYaw);
+    const fwdZ = Math.cos(this.playerYaw);
+    for (let i = 0; i < this.PARTICLE_COUNT; i++) {
+      const px = this.particlePos[i * 3];
+      const pz = this.particlePos[i * 3 + 2];
+      const dx = px - this.playerPos.x;
+      const dz = pz - this.playerPos.z;
+      const dist = Math.hypot(dx, dz);
+      if (dist <= radius) {
+        this.particleVel[i * 3] += fwdX * 7.5 - dz * 1.8;
+        this.particleVel[i * 3 + 1] += 2.8;
+        this.particleVel[i * 3 + 2] += fwdZ * 7.5 + dx * 1.8;
+      }
     }
   }
 
@@ -1788,37 +2443,71 @@ export class SamuraiEngine {
     }
   }
 
-  private checkSliceableBambooHit(reach: number) {
+  private checkSliceableBambooHit(
+    reach: number,
+    planeNormal: { x: number; y: number; z: number } = { x: 0.707, y: 0.707, z: 0 }
+  ) {
+    // 1. Bisect Sliceable Bamboo Stalks using Real-Time Planar Mesh Slicing (sliceBufferGeometryByPlane)
     for (const bamboo of this.sliceableBamboos) {
       if (bamboo.sliced) continue;
       if (bamboo.pos.distanceTo(this.playerPos) <= reach) {
         bamboo.sliced = true;
-        bamboo.mesh.scale.y = 0.35; // Lower stump remains rooted
-        // Spawn toppling upper bamboo stalk physics debris!
-        const topGeo = createSplineLatheGeometry(
-          [
-            [0.13, 0],
-            [0.12, 1.4],
-            [0.1, 2.8],
-          ],
-          16
+        const bisected = sliceBufferGeometryByPlane(
+          bamboo.mesh.geometry,
+          { x: 0, y: 1.55, z: 0 },
+          planeNormal
         );
-        const topMesh = new THREE.Mesh(topGeo, bamboo.mesh.material);
-        topMesh.position.set(bamboo.pos.x, 1.5, bamboo.pos.z);
-        this.scene.add(topMesh);
-        this.debrisPieces.push({
-          mesh: topMesh,
-          pos: topMesh.position.clone(),
-          vel: new THREE.Vector3(
-            Math.sin(this.playerYaw) * 4.2,
-            3.8,
-            Math.cos(this.playerYaw) * 4.2
-          ),
-          rotVel: new THREE.Vector3(2.8, 1.2, 3.4),
-          life: 3.5,
-        });
+        this.lastBisectedTriCount = bisected.upperTriCount + bisected.lowerTriCount;
+
+        // Replace lower mesh geometry with exact lower bisected half
+        bamboo.mesh.geometry = bisected.lowerGeometry;
+
+        // Spawn upper bisected half as a real Cannon-es Rigid Body with crimson/ink wound cap!
+        const upperMesh = new THREE.Mesh(bisected.upperGeometry, bamboo.mesh.material);
+        this.scene.add(upperMesh);
+        this.multiPhysics.addRigidBodyMesh(
+          upperMesh,
+          new CANNON.Cylinder(0.13, 0.11, 2.2, 8),
+          5.5,
+          { x: bamboo.pos.x, y: 1.65, z: bamboo.pos.z },
+          {
+            x: Math.sin(this.playerYaw) * 24 + planeNormal.x * 12,
+            y: 18,
+            z: Math.cos(this.playerYaw) * 24,
+          },
+          { x: 3.2, y: 1.8, z: -2.8 },
+          4.0,
+          false,
+          'sliced_half'
+        );
+
         this._v1.copy(bamboo.pos).setY(1.5);
         this.spawnBurstParticles(this._v1, 0x4ade80, 14, 6.0);
+        this.pushFloatingText('斬奪 ZANDATSU BISECTION!', bamboo.pos, '#4ade80', false);
+      }
+    }
+
+    // 2. Bisect & Shatter Destructible Cannon-es Wooden Crates within blade reach
+    for (let i = this.multiPhysics.entries.length - 1; i >= 0; i--) {
+      const prop = this.multiPhysics.entries[i];
+      if (!prop.isDestructibleProp) continue;
+      const dist = Math.hypot(
+        prop.body.position.x - this.playerPos.x,
+        prop.body.position.z - this.playerPos.z
+      );
+      if (dist <= reach + 0.5) {
+        prop.isDestructibleProp = false;
+        prop.life = 3.2;
+        prop.body.wakeUp();
+        prop.body.applyImpulse(
+          new CANNON.Vec3(
+            Math.sin(this.playerYaw) * 65,
+            35,
+            Math.cos(this.playerYaw) * 65
+          )
+        );
+        this._v1.set(prop.body.position.x, 0.6, prop.body.position.z);
+        this.spawnBurstParticles(this._v1, 0xfbbf24, 14, 6.5);
       }
     }
   }
@@ -1826,23 +2515,48 @@ export class SamuraiEngine {
   private spawnEnemyDismembermentDebris(enemy: ActiveEnemy) {
     if (enemy.dismembered) return;
     enemy.dismembered = true;
-    // Detach enemy's weapon arm & helmet as flying physics debris with crimson ink spray!
     enemy.rig.weaponArm.visible = false;
+
+    // 1. Real-Time Planar Mesh Bisection (Zandatsu) across the sword's cutting plane!
+    const moveDef = SIX_COMBAT_MOVES[this.activeCombatMove];
+    const sampleGeo = createSplineLatheGeometry(
+      [
+        [0.02, 0.0],
+        [0.32, 0.25],
+        [0.29, 0.75],
+        [0.34, 1.25],
+        [0.02, 1.4],
+      ],
+      20
+    );
+    const bisected = sliceBufferGeometryByPlane(
+      sampleGeo,
+      { x: 0, y: 0.72, z: 0 },
+      moveDef.cuttingPlaneNormalLocal
+    );
+    this.lastBisectedTriCount = bisected.upperTriCount + bisected.lowerTriCount;
+
+    const crimsonWoundMat = createSumiWashiMaterial(0x991b1b, 0.35, 0.2, this.textures);
+    const upperTorsoMesh = new THREE.Mesh(bisected.upperGeometry, crimsonWoundMat);
+    const lowerTorsoMesh = new THREE.Mesh(bisected.lowerGeometry, crimsonWoundMat);
     const severedArm = enemy.rig.weaponArm.clone();
     severedArm.visible = true;
-    severedArm.position.set(enemy.pos.x + 0.35, 1.35, enemy.pos.z);
-    this.scene.add(severedArm);
-    this.debrisPieces.push({
-      mesh: severedArm,
-      pos: severedArm.position.clone(),
-      vel: new THREE.Vector3(
-        (Math.random() - 0.5) * 5.5,
-        5.2,
-        (Math.random() - 0.5) * 5.5
-      ),
-      rotVel: new THREE.Vector3(6.5, 4.2, 5.8),
-      life: 3.2,
-    });
+
+    const killDir = new THREE.Vector3(
+      Math.sin(this.playerYaw),
+      0.35,
+      Math.cos(this.playerYaw)
+    ).normalize();
+
+    // 2. Spawn Articulated Cannon-es Ragdoll & Bisected Halves with opposing physical impulses!
+    this.multiPhysics.spawnArticulatedEnemyRagdoll(
+      this.scene,
+      enemy.pos,
+      killDir,
+      upperTorsoMesh,
+      lowerTorsoMesh,
+      severedArm
+    );
   }
 
   private spawnDetachedArmorPlate(origin: THREE.Vector3, colorHex: number) {
@@ -1999,21 +2713,46 @@ export class SamuraiEngine {
         dist <= enemyReach + 2.2 &&
         (enemy.state === 'windup' || enemy.state === 'attack')
       ) {
+        const deflectEval = evaluateSekiroDeflectAngle(
+          this.playerPos,
+          this.playerYaw,
+          enemy.pos
+        );
+        this.lastDeflectAngleDeg = deflectEval.angleDeg;
         deflected = true;
         enemy.state = 'staggered';
         enemy.stateTimer = 1.25;
-        enemy.posture += this.stats.postureBreakPower * 1.6;
+        enemy.posture += Math.round(
+          this.stats.postureBreakPower * 1.4 * deflectEval.postureMultiplier
+        );
         this.audio.playParryClash(true);
-        this.hitstopTimer = 0.07;
+        this.hitstopTimer = 0.06; // 60ms Sekiro Hit-Stop frame freeze
         this.cameraTrauma = Math.min(1, this.cameraTrauma + 0.42);
         this._v1.copy(this.playerPos).lerp(enemy.pos, 0.5).setY(1.35);
         this.spawnBurstParticles(this._v1, 0xfbbf24, 24, 9.5);
-        this.pushFloatingText('PERFECT DEFLECT!', enemy.pos, '#fbbf24', true);
+        this.pushFloatingText(
+          `弾き PERFECT DEFLECT! (${deflectEval.angleDeg}° · x${deflectEval.postureMultiplier})`,
+          enemy.pos,
+          '#fbbf24',
+          true
+        );
 
         if (enemy.posture >= enemy.maxPosture) {
           this.triggerPostureBreakDeathblow(enemy);
         }
         this.koku += 25;
+      }
+    }
+    if (deflected) {
+      const deflectDojo = this.comboDojo.recordPlayerMoveExecution(
+        'mizu_nagare_deflect',
+        0.65,
+        0,
+        this.stats.postureBreakPower,
+        performance.now() * 0.001
+      );
+      if (deflectDojo.newlyUnlockedScroll) {
+        this.pushFloatingText(`秘伝 SCROLL UNLOCKED: ${deflectDojo.newlyUnlockedScroll}`, this.playerPos, '#fbbf24', true);
       }
     }
     this.aiBrain.recordParryAttempt(deflected);
@@ -2359,10 +3098,29 @@ export class SamuraiEngine {
       this.playerRig.rightEyelid.scale.y = lidScaleY;
     }
 
-    // 2. Hair & Verlet Cape Wind Sway
+    // 2. Hair & 3D Verlet Integration Cloth Wind Sway (Haori Cloak + Temple Banner)
     this.playerRig.hairGroup.rotation.z = Math.sin(timeSec * 2.8) * 0.06;
     if (this.playerRig.capeMesh) {
       this.playerRig.capeMesh.rotation.x = 0.24 + Math.sin(timeSec * 3.6) * 0.09;
+    }
+
+    const windForce = {
+      x: Math.sin(timeSec * 1.9) * 0.42 - 0.18,
+      y: Math.cos(timeSec * 2.7) * 0.08,
+      z: -0.45 + Math.cos(timeSec * 1.5) * 0.25,
+    };
+    if (this.haoriVerletCloth) {
+      this.haoriVerletCloth.step(dt, windForce, {
+        x: this.playerVel.x,
+        y: this.playerVel.y,
+        z: this.playerVel.z,
+      });
+    }
+    if (this.bannerVerletCloth) {
+      this.bannerVerletCloth.step(dt, windForce, { x: 0, y: 0, z: 0 });
+    }
+    for (const mixer of this.customAssetMixers) {
+      mixer.update(dt);
     }
   }
 
@@ -2391,36 +3149,106 @@ export class SamuraiEngine {
 
   private updateTitleCameraAndIdle(dt: number) {
     this.titleOrbitAngle += dt * 0.22;
-    const radius = 11.5;
+    const groundY = this.openWorld.getGroundAndBridgeHeightAt(this.playerPos.x, this.playerPos.z);
+    this.playerPos.y = groundY;
+    this.playerRig.root.position.copy(this.playerPos);
+
+    const radius = 8.8;
     const camX = this.playerPos.x + Math.sin(this.titleOrbitAngle) * radius;
     const camZ = this.playerPos.z + Math.cos(this.titleOrbitAngle) * radius;
-    this.camera.position.set(camX, 5.2, camZ);
-    this.camera.lookAt(this.playerPos.x - 1.8, 1.8, this.playerPos.z - 2.0);
+    const camGroundY = this.openWorld.getGroundAndBridgeHeightAt(camX, camZ);
+    this.camera.position.set(camX, Math.max(camGroundY + 1.5, groundY + 3.6), camZ);
+    this.camera.lookAt(this.playerPos.x - 1.4, groundY + 1.55, this.playerPos.z - 1.5);
 
-    this.playerRig.torsoGroup.position.y = 0.75 + Math.sin(this.titleOrbitAngle * 6) * 0.03;
+    this.playerRig.torsoGroup.position.y = 0.75 + Math.sin(this.titleOrbitAngle * 3.2) * 0.025;
+    applyMoroteDualHandWeaponIK(this.playerRig, {
+      isParrying: false,
+      isAttacking: false,
+      activeMoveId: 1,
+      swingProgress: 0,
+      gaitSwing: 0,
+      breathTime: this.titleOrbitAngle * 2.5,
+      cameraMode: 'third_person_rpg',
+    });
   }
 
   private updateGameplayCamera(dt: number) {
     this.zanshinZoomTimer = Math.max(0, this.zanshinZoomTimer - dt);
-    const damp = 1 - Math.exp(-8.5 * dt);
+    this.cameraTrauma = Math.max(0, this.cameraTrauma - dt * 2.2);
+    const shake = this.cameraTrauma * this.cameraTrauma * 0.45;
+    const shakeX = (Math.random() - 0.5) * shake;
+    const shakeY = (Math.random() - 0.5) * shake;
+
+    const damp = 1 - Math.exp(-10.5 * dt);
     this.cameraFocus.x = THREE.MathUtils.lerp(this.cameraFocus.x, this.playerPos.x, damp);
-    this.cameraFocus.y = THREE.MathUtils.lerp(this.cameraFocus.y, this.playerPos.y * 0.4 + 1.0, damp);
+    this.cameraFocus.y = THREE.MathUtils.lerp(this.cameraFocus.y, this.playerPos.y, damp);
     this.cameraFocus.z = THREE.MathUtils.lerp(this.cameraFocus.z, this.playerPos.z, damp);
 
+    const heightScale = (this.appearance.bodyHeight || 1.78) / 1.78;
+    if (this.haoriVerletCloth) {
+      this.haoriVerletCloth.mesh.visible = this.cameraMode !== 'first_person_fpv';
+    }
+
+    if (this.cameraMode === 'first_person_fpv') {
+      // Mode 2: 1st-Person Samurai FPV (Eye level, looking forward along yaw + mouse pitch, two hands & weapon visible in front)
+      const lookYaw = this.playerYaw - this.mousePosNDC.x * 0.52;
+      const lookPitch = THREE.MathUtils.clamp(-0.12 + this.mousePosNDC.y * 0.38, -0.65, 0.55);
+      const fwdX = Math.sin(lookYaw);
+      const fwdZ = Math.cos(lookYaw);
+      const eyeY = this.playerPos.y + 1.56 * heightScale;
+
+      this.camera.position.set(
+        this.playerPos.x + fwdX * 0.08 + shakeX * 0.35,
+        eyeY + shakeY * 0.35,
+        this.playerPos.z + fwdZ * 0.08
+      );
+      this.camera.lookAt(
+        this.playerPos.x + fwdX * 14.0,
+        eyeY + Math.sin(lookPitch) * 14.0,
+        this.playerPos.z + fwdZ * 14.0
+      );
+      return;
+    }
+
+    if (this.cameraMode === 'third_person_rpg') {
+      // Mode 1 (DEFAULT): Over-the-Shoulder 3rd-Person Action-RPG View (Ghost of Tsushima / Sekiro style)
+      const orbitYaw = this.playerYaw - this.mousePosNDC.x * 0.38;
+      const fwdX = Math.sin(orbitYaw);
+      const fwdZ = Math.cos(orbitYaw);
+      const rightX = Math.cos(orbitYaw);
+      const rightZ = -Math.sin(orbitYaw);
+
+      const zanshinPull = this.zanshinZoomTimer > 0 ? -1.1 : 0;
+      const backDist = 3.45 + zanshinPull;
+      const shoulderRight = 0.65;
+      const upHeight = 1.78 * heightScale - this.mousePosNDC.y * 0.65;
+
+      const desiredX = this.cameraFocus.x - fwdX * backDist + rightX * shoulderRight;
+      const desiredZ = this.cameraFocus.z - fwdZ * backDist + rightZ * shoulderRight;
+      const terrainFloorY = this.openWorld.getGroundAndBridgeHeightAt(desiredX, desiredZ);
+      const desiredY = Math.max(terrainFloorY + 0.65, this.cameraFocus.y + upHeight);
+
+      this.camera.position.x = THREE.MathUtils.lerp(this.camera.position.x, desiredX, damp) + shakeX;
+      this.camera.position.y = THREE.MathUtils.lerp(this.camera.position.y, desiredY, damp) + shakeY;
+      this.camera.position.z = THREE.MathUtils.lerp(this.camera.position.z, desiredZ, damp);
+
+      const lookTargetX = this.cameraFocus.x + fwdX * 12.0 + rightX * 0.28;
+      const lookTargetY = this.cameraFocus.y + 1.42 * heightScale + this.mousePosNDC.y * 1.65;
+      const lookTargetZ = this.cameraFocus.z + fwdZ * 12.0 + rightZ * 0.28;
+      this.camera.lookAt(lookTargetX, lookTargetY, lookTargetZ);
+      return;
+    }
+
+    // Mode 3: Elevated 45-Degree Isometric / Tactical RPG View
     const zanshinOffset = this.zanshinZoomTimer > 0 ? -5.2 : 0;
     const combatZoom =
       (this.enemies.some((e) => e.pos.distanceTo(this.playerPos) < 9) ? -1.4 : 0) + zanshinOffset;
     const targetX = this.cameraFocus.x;
-    const targetY = this.cameraFocus.y + 15.5 + combatZoom;
-    const targetZ = this.cameraFocus.z + 14.5 + combatZoom;
-
-    this.cameraTrauma = Math.max(0, this.cameraTrauma - dt * 2.2);
-    const shake = this.cameraTrauma * this.cameraTrauma * 0.65;
-    const shakeX = (Math.random() - 0.5) * shake;
-    const shakeY = (Math.random() - 0.5) * shake;
+    const targetY = this.cameraFocus.y + 15.2 + combatZoom;
+    const targetZ = this.cameraFocus.z + 14.2 + combatZoom;
 
     this.camera.position.set(targetX + shakeX, targetY + shakeY, targetZ);
-    this.camera.lookAt(this.cameraFocus.x, this.cameraFocus.y, this.cameraFocus.z - 1.5);
+    this.camera.lookAt(this.cameraFocus.x, this.cameraFocus.y + 1.0, this.cameraFocus.z - 1.5);
   }
 
   private updatePlayingSimulation(dt: number, nowMs: number) {
@@ -2429,17 +3257,25 @@ export class SamuraiEngine {
     this.chronosTimer = Math.max(0, this.chronosTimer - dt);
     this.rollAnimTimer = Math.max(0, this.rollAnimTimer - dt);
 
-    // 5 Elemental Weapon Infusions (Z, X, C, V, B)
+    // 5 Elemental Weapon Infusions (Z, X, C, U, B) — KeyV is dedicated to 3-Mode Camera Switcher
     if (this.keysJustPressed.has('KeyZ')) this.toggleElementalInfusion('kagutsuchi_flame');
     if (this.keysJustPressed.has('KeyX')) this.toggleElementalInfusion('raijin_thunder');
     if (this.keysJustPressed.has('KeyC')) this.toggleElementalInfusion('fujin_gale');
-    if (this.keysJustPressed.has('KeyV')) this.toggleElementalInfusion('yuki_onna_frost');
+    if (this.keysJustPressed.has('KeyU')) this.toggleElementalInfusion('yuki_onna_frost');
     if (this.keysJustPressed.has('KeyB')) this.toggleElementalInfusion('yomi_blood_ink');
 
     // 3D Face & Body Customizer Hotkey (`KeyK`)
     if (this.keysJustPressed.has('KeyK')) {
       this.setCustomizerMode(!this.customizerMode);
       return;
+    }
+
+    // Interactive Combo Dojo & Ghost Master Hotkey (`KeyT`)
+    if (this.keysJustPressed.has('KeyT')) {
+      this.toggleDojoOverlay();
+    }
+    if (this.keysJustPressed.has('KeyH')) {
+      this.triggerJapaneseBattleCallout('kuji_in_mantra', this.playerPos);
     }
 
     // Weapon & Tool Hotkeys
@@ -2596,15 +3432,7 @@ export class SamuraiEngine {
         return;
       }
 
-      // Toroidal Seamless Infinite-Looping World Boundary (p_world mod R_arena)
-      const r = Math.hypot(this.playerPos.x, this.playerPos.z + 2);
-      if (r > 23.8) {
-        // Wrap seamlessly across the mist horizon to opposite side of toroidal chunk
-        this.playerPos.x = -this.playerPos.x * 0.88;
-        this.playerPos.z = -(this.playerPos.z + 2) * 0.88 - 2;
-        this.cameraFocus.copy(this.playerPos);
-      }
-
+      // Seamless Infinite Open-World CDLOD & Floating Origin Streaming (No Arena Walls!)
       if (this.attackAnimTimer <= 0) {
         this.playerYaw = Math.atan2(moveX, moveZ);
       }
@@ -2616,18 +3444,76 @@ export class SamuraiEngine {
       }
     }
 
-    // Vertical Gravity & Jump Physics
+    // Sanitize Player Position & Velocity against NaN/Infinity
+    const safeVel = sanitizePhysicsVec3(this.playerVel, 60, { x: 0, y: 0, z: 0 });
+    if (safeVel.wasSanitized) {
+      this.playerVel.set(safeVel.x, safeVel.y, safeVel.z);
+    }
+    const safePos = sanitizePhysicsVec3(this.playerPos, 50000, { x: 0, y: 0, z: 12 });
+    if (safePos.wasSanitized) {
+      this.playerPos.set(safePos.x, Math.max(0, safePos.y), safePos.z);
+    }
+
+    // Update Infinite Open-World 5x5 CDLOD Chunks, Rivers, Caves, Props & Dynamic Enemy Spawning
+    this.lastOpenWorldTelemetry = this.openWorld.updateStreamedWorld(
+      this.playerPos,
+      nowMs * 0.001,
+      this.textures.washiNormal,
+      this.textures.washiBump,
+      (shiftDelta) => {
+        this.cameraFocus.sub(shiftDelta);
+        for (const e of this.enemies) {
+          e.pos.sub(shiftDelta);
+          e.rig.root.position.copy(e.pos);
+        }
+        for (const p of this.projectiles) {
+          p.pos.sub(shiftDelta);
+          p.mesh.position.copy(p.pos);
+        }
+        this.pushFloatingText('FLOATING ORIGIN RE-CENTERED (0.0m JITTER)', this.playerPos, '#38bdf8', false);
+      },
+      (cx, cz, wx, wz, biome) => {
+        this.spawnOpenWorldChunkEntities(cx, cz, wx, wz, biome);
+      }
+    );
+
+    // Step Interactive Combo Dojo & Holographic Ghost Master
+    const attackNormT =
+      this.attackAnimTimer > 0
+        ? 1 - this.attackAnimTimer / Math.max(0.05, this.activeMoveDuration)
+        : null;
+    this.lastDojoSnapshot = this.comboDojo.stepGhostMasterAndTelemetry(
+      dt,
+      this.playerPos,
+      this.playerYaw,
+      attackNormT,
+      nowMs * 0.001
+    );
+
+    if (this.dialogueTimer > 0) {
+      this.dialogueTimer = Math.max(0, this.dialogueTimer - dt);
+      if (this.dialogueTimer <= 0) {
+        this.activeDialogueSubtitle = null;
+      }
+    }
+
+    // Vertical Gravity, Terrain Grounding & Jump Physics
+    const terrainGroundY = this.openWorld.getGroundAndBridgeHeightAt(
+      this.playerPos.x,
+      this.playerPos.z
+    );
     if (!this.isGrounded && !this.grappleActive) {
       this.playerPos.y += this.playerVel.y * dt;
       this.playerVel.y -= 28.0 * dt;
-      if (this.playerPos.y <= 0) {
-        this.playerPos.y = 0;
+      if (this.playerPos.y <= terrainGroundY) {
+        this.playerPos.y = terrainGroundY;
         this.playerVel.y = 0;
         this.isGrounded = true;
         this.playerRig.bodyPivot.scale.set(1.2, 0.8, 1.2);
         this.audio.playFootstep();
       }
-    } else if (this.isGrounded) {
+    } else if (this.isGrounded && !this.grappleActive) {
+      this.playerPos.y = terrainGroundY;
       this.coyoteTimer = 0.1;
     }
 
@@ -2655,25 +3541,40 @@ export class SamuraiEngine {
       this.playerRig.bodyPivot.rotation.x = 0;
     }
 
-    // Update Player Articulated Rig
+    // Update Player Articulated Rig with 6-Move Cubic Hermite Spline & Two-Handed Morote IK
     this.playerRig.root.position.copy(this.playerPos);
     this.playerRig.root.rotation.y = this.playerYaw;
     const gaitSwing = isMoving ? Math.sin(this.walkDistance * 2.8) * 0.55 : 0;
-    this.playerRig.leftLeg.rotation.x = gaitSwing;
-    this.playerRig.rightLeg.rotation.x = -gaitSwing;
-    this.playerRig.leftArm.rotation.x = -gaitSwing * 0.7;
 
-    if (this.attackAnimTimer > 0) {
-      const t = 1 - this.attackAnimTimer / 0.28;
-      this.playerRig.rightArm.rotation.x = -Math.PI * 0.65 + Math.sin(t * Math.PI) * 1.65;
-      this.playerRig.rightArm.rotation.z = (this.comboStep % 2 === 0 ? -1 : 1) * 0.45;
-    } else if (this.parryWindowTimer > 0) {
-      this.playerRig.rightArm.rotation.x = -Math.PI * 0.45;
-      this.playerRig.rightArm.rotation.z = 0.75;
-    } else {
-      this.playerRig.rightArm.rotation.x = gaitSwing * 0.5;
-      this.playerRig.rightArm.rotation.z = 0;
-    }
+    // Analytical Two-Bone IK (Law of Cosines) for Leg Terrain Grounding
+    const leftFootIK = solveTwoBoneIK(
+      { x: -0.18, y: 0.78, z: 0 },
+      { x: -0.18, y: Math.max(0, Math.sin(this.walkDistance * 2.8) * 0.12), z: gaitSwing * 0.28 },
+      { x: 0, y: 0, z: 1 },
+      0.42,
+      0.4
+    );
+    this.playerRig.leftLeg.rotation.x = gaitSwing - leftFootIK.lowerBoneBendRad * 0.12;
+    this.playerRig.rightLeg.rotation.x = -gaitSwing + leftFootIK.lowerBoneBendRad * 0.12;
+
+    const moveDef = SIX_COMBAT_MOVES[this.activeCombatMove];
+    const normalizedSwingT =
+      this.attackAnimTimer > 0
+        ? 1 - this.attackAnimTimer / Math.max(0.05, this.activeMoveDuration)
+        : 0;
+
+    applyMoroteDualHandWeaponIK(this.playerRig, {
+      isParrying: this.parryWindowTimer > 0,
+      isAttacking: this.attackAnimTimer > 0,
+      activeMoveId: moveDef ? moveDef.moveNumber : 1,
+      swingProgress: normalizedSwingT,
+      gaitSwing,
+      breathTime: this.runTimeSec,
+      cameraMode: this.cameraMode,
+    });
+
+    // Step 60Hz Cannon-es Rigid-Body & Ragdoll Physics World
+    this.multiPhysics.step(dt, this.scene);
 
     // Update Interactive Grass Bending
     this.updateInteractiveGrass(nowMs * 0.001);
@@ -2788,7 +3689,8 @@ export class SamuraiEngine {
       enemy.rig.root.rotation.y = yawToPlayer;
 
       if (enemy.isTrainingDummy) {
-        enemy.pos.set(0, 0, 8.2);
+        const dummyGroundY = this.openWorld.getGroundAndBridgeHeightAt(0, 8.2);
+        enemy.pos.set(0, dummyGroundY, 8.2);
         if (enemy.state === 'staggered') {
           (enemy.rig.telegraphRing.material as THREE.MeshBasicMaterial).opacity = 0;
           enemy.rig.weaponArm.rotation.x = 0.45;
@@ -2978,6 +3880,7 @@ export class SamuraiEngine {
         }
       }
 
+      enemy.pos.y = this.openWorld.getGroundAndBridgeHeightAt(enemy.pos.x, enemy.pos.z);
       enemy.rig.root.position.copy(enemy.pos);
     }
   }
@@ -3128,6 +4031,13 @@ export class SamuraiEngine {
       }
 
       if (!p.isCaltropGrounded) {
+        // Apply True Ballistic Parabolic Trajectory + Quadratic Aerodynamic Drag:
+        // F_drag = -0.5 * rho * ||v|| * v * C_d * A
+        const drag = computeAerodynamicDragForce(p.vel, 1.225, 0.35, 0.008);
+        p.vel.x += drag.fx * dt;
+        p.vel.y += (drag.fy - (p.effectType === 'bullet' ? 0.8 : 4.2)) * dt;
+        p.vel.z += drag.fz * dt;
+
         p.pos.x += p.vel.x * dt;
         p.pos.y += p.vel.y * dt;
         p.pos.z += p.vel.z * dt;
@@ -3367,6 +4277,40 @@ export class SamuraiEngine {
       shadowCrossReady: this.shadowCrossReady,
       grappleActive: this.grappleActive,
       armorIntegrity: this.armorIntegrity,
+      activeCombatMove: this.activeCombatMove,
+      activeCombatMoveDef: SIX_COMBAT_MOVES[this.activeCombatMove],
+      lastBladeRayHits: this.lastBladeRayHits,
+      lastBisectedTriCount: this.lastBisectedTriCount,
+      verletClothNodeCount: this.haoriVerletCloth
+        ? (this.haoriVerletCloth.cols + 1) * (this.haoriVerletCloth.rows + 1)
+        : 99,
+      cannonRigidBodyCount: this.multiPhysics.entries.length + 1,
+      inspectedTelemetry: this.assetManager.getLastTelemetry(),
+      lastDeflectAngleDeg: this.lastDeflectAngleDeg,
+      openWorldTelemetry: this.lastOpenWorldTelemetry,
+      dojoSnapshot: this.lastDojoSnapshot,
+      activePbrBundle: this.activePbrBundle
+        ? (() => {
+            const preset =
+              NANO_BANANA_PBR_PRESETS.find((p) => p.id === this.activePbrBundle!.presetId) ||
+              NANO_BANANA_PBR_PRESETS[0];
+            return {
+              presetId: this.activePbrBundle.presetId,
+              title: preset.name,
+              targetSlot: preset.targetCategory,
+              sourceModel: this.activePbrBundle.sourceModel,
+              pomSteps: 16,
+              triplanarActive: true,
+              albedoUrl: this.activePbrBundle.albedoDataUrl,
+              normalUrl: this.activePbrBundle.normalDataUrl,
+              heightUrl: this.activePbrBundle.heightDataUrl,
+              roughnessUrl: this.activePbrBundle.roughnessDataUrl,
+            };
+          })()
+        : null,
+      activeDialogueSubtitle: this.activeDialogueSubtitle,
+      cameraMode: this.cameraMode,
+      cameraModeLabel: CAMERA_MODE_LABELS[this.cameraMode],
     });
   }
 
@@ -3375,6 +4319,7 @@ export class SamuraiEngine {
     cancelAnimationFrame(this.frameId);
     clearTimeout(this.frameId);
     this.audio.stopAmbientLoop();
+    this.openWorld.disposeAll();
     const unbind = (this as unknown as { _unbind?: () => void })._unbind;
     if (unbind) unbind();
     this.renderer.dispose();

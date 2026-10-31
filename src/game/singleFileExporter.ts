@@ -1,5 +1,7 @@
 import { WEAPONS, THROWABLES, ARMORS, HELMETS, TWENTY_AUTHENTIC_ARSENAL } from './arsenal';
 import { CAMPAIGN_STAGES, ENEMY_ARCHETYPES } from './stages';
+import { VERIFIED_3D_ASSET_PRESETS } from './assetManager';
+import { SIX_COMBAT_MOVES } from './combatSplinesAndShaders';
 
 export function downloadStandaloneSamuraiHTML() {
   const weaponsJson = JSON.stringify(WEAPONS);
@@ -9,13 +11,15 @@ export function downloadStandaloneSamuraiHTML() {
   const twentyArsenalJson = JSON.stringify(TWENTY_AUTHENTIC_ARSENAL);
   const stagesJson = JSON.stringify(CAMPAIGN_STAGES);
   const archetypesJson = JSON.stringify(ENEMY_ARCHETYPES);
+  const presetsJson = JSON.stringify(VERIFIED_3D_ASSET_PRESETS);
+  const sixMovesJson = JSON.stringify(SIX_COMBAT_MOVES);
 
   const html = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>KAMI NO WASHI: BLADE OF THE INK (紙之刃 · KAMI-NO-YAIBA) — AAA Single-File 3D Samurai ARPG</title>
+<title>KAMI NO WASHI: BLADE OF THE INK (紙之刃 · KAMI-NO-YAIBA) — AAA Single-File ES-Module 3D Samurai ARPG</title>
 <style>
   * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
   body { background: #181411; color: #f3ebd9; font-family: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; overflow: hidden; }
@@ -30,8 +34,8 @@ export function downloadStandaloneSamuraiHTML() {
   .btn:hover { background: #b91c1c; }
   .btn-sec { background: #241d18; color: #f3ebd9; border: 1px solid #57493d; padding: 7px 13px; border-radius: 4px; cursor: pointer; font-weight: 600; font-size: 12px; }
   .btn-sec:hover { border-color: #fbbf24; }
-  #modal { position: fixed; inset: 0; background: rgba(10, 8, 6, 0.88); z-index: 30; display: none; align-items: center; justify-content: center; padding: 24px; }
-  #modal.open { display: flex; }
+  #modal, #asset-modal { position: fixed; inset: 0; background: rgba(10, 8, 6, 0.88); z-index: 30; display: none; align-items: center; justify-content: center; padding: 24px; }
+  #modal.open, #asset-modal.open { display: flex; }
   .modal-box { background: #1c1612; border: 1px solid #fbbf24; border-radius: 8px; max-width: 1060px; width: 100%; max-height: 86vh; display: flex; flex-direction: column; overflow: hidden; }
   .modal-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; padding: 16px; overflow-y: auto; }
   .item-card { background: #14100d; border: 1px solid #3d322a; border-radius: 6px; padding: 10px; display: flex; flex-direction: column; justify-content: space-between; gap: 8px; }
@@ -39,11 +43,15 @@ export function downloadStandaloneSamuraiHTML() {
   .portrait-img { width: 100%; height: 110px; object-fit: cover; border-radius: 4px; border: 1px solid rgba(251, 191, 36, 0.35); background: #0d0a08; }
   #float-layer { position: fixed; inset: 0; pointer-events: none; z-index: 20; overflow: hidden; }
   .float-txt { position: absolute; font-weight: 800; text-shadow: -1.5px -1.5px 0 #090807, 1.5px -1.5px 0 #090807, -1.5px 1.5px 0 #090807, 1.5px 1.5px 0 #090807; transform: translate(-50%, -50%); white-space: nowrap; }
+  .drop-zone { border: 2px dashed rgba(251, 191, 36, 0.5); padding: 16px; border-radius: 6px; text-align: center; background: rgba(15, 11, 9, 0.7); cursor: pointer; }
 </style>
 <script type="importmap">
 {
   "imports": {
-    "three": "https://unpkg.com/three@0.170.0/build/three.module.js"
+    "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+    "cannon-es": "https://cdn.jsdelivr.net/npm/cannon-es@0.20.0/dist/cannon-es.js",
+    "gsap": "https://cdn.jsdelivr.net/npm/gsap@3.12.5/index.js"
   }
 }
 </script>
@@ -62,10 +70,11 @@ export function downloadStandaloneSamuraiHTML() {
       <div class="bar-bg"><div id="posture-bar" class="bar-fill" style="width:0%; background:#f59e0b;"></div></div>
       <div style="margin-top:6px; font-size:11px; display:flex; justify-content:space-between; color:#38bdf8;"><span>KI SPIRIT · 気力</span><span id="ki-txt" style="font-family:monospace;">120/120</span></div>
       <div class="bar-bg"><div id="ki-bar" class="bar-fill" style="width:100%; background:#38bdf8;"></div></div>
+      <div id="move-txt" style="margin-top:6px; font-size:10px; color:#fbbf24; font-family:monospace;">Move 1/6: Kesa-Giri · 8-Ray Hitbox</div>
     </div>
 
-    <div class="card" style="text-align:center; min-width:330px;">
-      <div id="stage-label" style="font-weight:700; color:#fbbf24; font-size:13px;">Stage 1/5: Bamboo Forest of Whispers · 囁きの竹林</div>
+    <div class="card" style="text-align:center; min-width:340px;">
+      <div id="stage-label" style="font-weight:700; color:#fbbf24; font-size:13px;">Stage 1/10: Bamboo Forest of Whispers · 囁きの竹林</div>
       <div id="boss-label" style="font-size:11px; color:#d6c7b2; margin-top:4px; font-family:monospace;">Score 0 · Koku 250石 · Combo 0x · Foes 5</div>
       <div id="boss-bar-wrap" style="display:none; margin-top:6px;">
         <div id="boss-name" style="font-size:12px; font-weight:700; color:#fca5a5;"></div>
@@ -73,20 +82,22 @@ export function downloadStandaloneSamuraiHTML() {
       </div>
     </div>
 
-    <div class="card" style="text-align:right; min-width:265px;">
-      <div style="font-weight:700; color:#fbbf24; font-size:11px; letter-spacing:0.08em;">AI ADAPTATION MATRIX</div>
+    <div class="card" style="text-align:right; min-width:275px;">
+      <div style="font-weight:700; color:#fbbf24; font-size:11px; letter-spacing:0.08em;">AI ADAPTATION MATRIX T_player</div>
       <div id="ai-stance" style="font-size:12px; color:#f3ebd9; margin-top:3px; font-weight:600;">Balanced Chudan-no-Kamae</div>
       <div id="ai-callout" style="font-size:11px; color:#fbbf24; margin-top:2px; font-weight:700;">TRACKING BACK STEP</div>
-      <div id="ai-metrics" style="font-size:11px; color:#c7b79e; margin-top:4px; font-family:monospace;">Spam: 0% | Ranged: 0% | Parry: 50%</div>
+      <div id="ai-metrics" style="font-size:11px; color:#c7b79e; margin-top:4px; font-family:monospace;">[R_m:0% R_r:0% D:BACK P:50% J:0%]</div>
     </div>
   </div>
 
   <div class="card interactive" style="align-self:center; display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
     <span id="equip-label" style="font-size:12px; font-weight:600; color:#fbbf24;">Blade: Uchigatana | Do: Ronin Haori | Kabuto: Suji-Kabuto | Tool: Shuriken (12)</span>
     <button class="btn-sec" id="cycle-wep-btn">Swap Slot [Q/E/1-3]</button>
+    <button class="btn-sec" id="cam-mode-btn">[V] Camera: 3rd-Person RPG</button>
     <button class="btn-sec" id="dojo-mode-btn">Dojo Training Mode · 稽古道場</button>
-    <button class="btn" id="open-forge-btn">20-Arsenal & Ukiyo-e Forge [Tab/I]</button>
-    <span style="font-size:11px; color:#d6c7b2;">WASD Move · Shift Dash · Space Jump · Click Strike (Hold Heavy) · Right-Click Parry · F Zanshin Finisher · R Ninjutsu</span>
+    <button class="btn-sec" id="open-asset-btn">3D Asset Loader & Dropper [L]</button>
+    <button class="btn" id="open-forge-btn">Arsenal & Armor Forge [Tab/I]</button>
+    <span style="font-size:11px; color:#d6c7b2;">[V] 3-Mode Camera · 6-Moves: Tap LMB (1-3) · Hold LMB (4: Iaijutsu) · W+Shift+LMB (5: Tsuki) · Space+LMB (6: Kabuto-Wari) · RMB Parry</span>
   </div>
 </div>
 
@@ -94,8 +105,8 @@ export function downloadStandaloneSamuraiHTML() {
   <div class="modal-box">
     <div style="padding:14px 18px; border-bottom:1px solid #3d322a; display:flex; justify-content:space-between; align-items:center;">
       <div>
-        <div style="font-weight:700; font-size:16px; color:#fbbf24;">KAMI NO WASHI — 20-ARSENAL, DO ARMOR, KABUTO & UKIYO-E SCROLL FORGE</div>
-        <div style="font-size:12px; color:#d6c7b2;">Procedural High-Poly Parametric 3D Meshes + Ukiyo-e Woodblock Scroll Portraits</div>
+        <div style="font-weight:700; font-size:16px; color:#fbbf24;">KAMI NO WASHI — ARSENAL, DO ARMOR, KABUTO & UKIYO-E SCROLL FORGE</div>
+        <div style="font-size:12px; color:#d6c7b2;">Differential Cosh Sori Blades + Spherical-Harmonic SkinnedMesh Armor + Ukiyo-e Woodblock Scrolls</div>
       </div>
       <button class="btn" id="close-forge-btn">Close [Tab / Esc]</button>
     </div>
@@ -103,8 +114,44 @@ export function downloadStandaloneSamuraiHTML() {
   </div>
 </div>
 
+<div id="asset-modal" class="interactive">
+  <div class="modal-box" style="max-width:780px; padding:18px; gap:14px;">
+    <div style="display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #3d322a; padding-bottom:10px;">
+      <div>
+        <div style="font-weight:700; font-size:16px; color:#38bdf8;">LIVE 3D ASSET INSPECTOR & GLTF/GLB/HDRI DROPPER</div>
+        <div style="font-size:12px; color:#d6c7b2;">GLTFLoader + DRACOLoader + RGBELoader · Hot-swap Samurai, Bosses, Weapons, or HDRI</div>
+      </div>
+      <button class="btn" id="close-asset-btn">Close [L / Esc]</button>
+    </div>
+    <div style="display:flex; gap:10px; align-items:center;">
+      <select id="asset-slot-sel" class="btn-sec" style="padding:8px;">
+        <option value="samurai">Target Slot: Samurai Hero</option>
+        <option value="weapon">Target Slot: Equipped Weapon</option>
+        <option value="boss">Target Slot: Active Enemy / Boss</option>
+        <option value="hdri">Target Slot: Environment HDRI (.hdr)</option>
+      </select>
+      <input id="asset-url-input" type="text" placeholder="Paste CORS-safe .glb / .gltf / .hdr URL..." style="flex:1; background:#120e0b; color:#f3ebd9; border:1px solid #57493d; padding:8px 12px; border-radius:4px;" />
+      <button class="btn" id="load-url-btn">Load URL</button>
+    </div>
+    <label class="drop-zone" id="drop-zone">
+      <input type="file" id="asset-file-input" accept=".glb,.gltf,.hdr" style="display:none;" />
+      <div style="font-weight:700; color:#fbbf24;">Drag & Drop any local .glb, .gltf, or .hdr file here (or click to browse)</div>
+      <div id="asset-telemetry" style="font-size:11px; color:#38bdf8; margin-top:6px; font-family:monospace;">Ready · Differential Cosh Sori & Spherical-Harmonic SkinnedMesh Active</div>
+    </label>
+    <div id="preset-grid" class="modal-grid" style="padding:4px; max-height:280px;"></div>
+  </div>
+</div>
+
 <script type="module">
   import * as THREE from 'three';
+  import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+  import { DRACOLoader } from 'three/addons/loaders/DRACOLoader.js';
+  import { RGBELoader } from 'three/addons/loaders/RGBELoader.js';
+  import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+  import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+  import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+  import { ShaderPass } from 'three/addons/postprocessing/ShaderPass.js';
+  import * as CANNON from 'cannon-es';
 
   const WEAPONS = ${weaponsJson};
   const THROWABLES = ${throwablesJson};
@@ -113,6 +160,8 @@ export function downloadStandaloneSamuraiHTML() {
   const TWENTY_ARSENAL = ${twentyArsenalJson};
   const STAGES = ${stagesJson};
   const ARCHETYPES = ${archetypesJson};
+  const ASSET_PRESETS = ${presetsJson};
+  const SIX_MOVES = ${sixMovesJson};
 
   // 1. Procedural Web Audio API Synthesizer
   class AudioSynth {
@@ -167,7 +216,20 @@ export function downloadStandaloneSamuraiHTML() {
   }
   const audio = new AudioSynth();
 
-  // 2. Procedural Washi Paper Fiber, Tamahagane Damascus & Sumi-e Splatter Canvas Textures
+  // 2. Smart AssetManager (GLTFLoader + DRACOLoader + RGBELoader)
+  const dracoLoader = new DRACOLoader();
+  dracoLoader.setDecoderPath('https://www.gstatic.com/draco/versioned/decoders/1.5.6/');
+  const gltfLoader = new GLTFLoader();
+  gltfLoader.setDRACOLoader(dracoLoader);
+  const rgbeLoader = new RGBELoader();
+
+  // 3. Cannon-es 60Hz Rigid-Body & Ragdoll World + 3D Verlet Cloth + Planar Mesh Slicing
+  const physicsWorld = new CANNON.World({ gravity: new CANNON.Vec3(0, -19.6, 0) });
+  const groundBody = new CANNON.Body({ type: CANNON.Body.STATIC, shape: new CANNON.Plane() });
+  groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
+  physicsWorld.addBody(groundBody);
+  const rigidBodies = [];
+
   function buildTextures() {
     const wc = document.createElement('canvas'); wc.width = 512; wc.height = 512;
     const wctx = wc.getContext('2d');
@@ -207,28 +269,28 @@ export function downloadStandaloneSamuraiHTML() {
   }
   const textures = buildTextures();
 
-  // 3. Parametric High-Subdivision Geometry Helpers (Lathe, Extrude with bevelSegments: 8, Tube)
   function createSplineLathe(profile, radialSegments = 48, curveSamples = 24) {
     const pts = profile.map(([r, y]) => new THREE.Vector2(Math.max(0.001, r), y));
     const spline = new THREE.SplineCurve(pts);
     return new THREE.LatheGeometry(spline.getPoints(curveSamples), radialSegments);
   }
 
+  // Differential Curvature Katana: P(u, v) = (x(u,v), y(u) + alpha*cosh(beta*u), z(u,v))
   function createExtrudedBlade(len, baseWidth, tipWidth, sori, thickness = 0.016) {
     const shape = new THREE.Shape();
-    const steps = 20;
+    const steps = 24;
     for (let i = 0; i <= steps; i++) {
-      const t = i / steps;
-      const y = t * len;
-      const arch = Math.sin(t * Math.PI) * sori + t * t * sori * 0.35;
+      const u = i / steps;
+      const y = u * len + sori * 0.1 * Math.cosh(1.4 * u);
+      const arch = sori * (Math.cosh(1.35 * u) - 1.0);
       if (i === 0) shape.moveTo(arch, y); else shape.lineTo(arch, y);
     }
     for (let i = steps; i >= 0; i--) {
-      const t = i / steps;
-      const y = t * len;
-      const w = baseWidth * (1 - t * 0.35) + tipWidth * (t * 0.35);
-      const arch = Math.sin(t * Math.PI) * sori + t * t * sori * 0.35;
-      shape.lineTo(arch + w * (i === steps ? 0.2 : 1), y);
+      const u = i / steps;
+      const y = u * len + sori * 0.1 * Math.cosh(1.4 * u);
+      const w = baseWidth * (1 - u * 0.35) + tipWidth * (u * 0.35);
+      const arch = sori * (Math.cosh(1.35 * u) - 1.0);
+      shape.lineTo(arch + w * (i === steps ? 0.15 : 1), y);
     }
     shape.closePath();
     const geo = new THREE.ExtrudeGeometry(shape, {
@@ -247,21 +309,6 @@ export function downloadStandaloneSamuraiHTML() {
       bumpMap: textures.washiBump,
       bumpScale: 0.024
     });
-    mat.onBeforeCompile = (shader) => {
-      shader.fragmentShader = shader.fragmentShader.replace(
-        '#include <dithering_fragment>',
-        \`
-        float lum = dot(gl_FragColor.rgb, vec3(0.299, 0.587, 0.114));
-        float stepFactor = lum < 0.14 ? 0.56 : (lum < 0.34 ? 0.82 : (lum < 0.66 ? 0.98 : 1.10));
-        gl_FragColor.rgb *= stepFactor;
-        vec3 viewDir = normalize(vViewPosition);
-        float ndotv = abs(dot(normalize(vNormal), viewDir));
-        float inkRim = smoothstep(0.18, 0.46, ndotv);
-        gl_FragColor.rgb = mix(vec3(0.06, 0.045, 0.035), gl_FragColor.rgb, 0.32 + 0.68 * inkRim);
-        #include <dithering_fragment>
-        \`
-      );
-    };
     return mat;
   }
 
@@ -277,7 +324,6 @@ export function downloadStandaloneSamuraiHTML() {
     return m;
   }
 
-  // 4. Parametric 3D Weapon Mesh Builder
   function buildWeaponMesh(weapon) {
     const g = new THREE.Group();
     const bladeMat = createSumiMaterial(weapon.bladeColor, 0.14, 0.96, true);
@@ -299,7 +345,6 @@ export function downloadStandaloneSamuraiHTML() {
     return g;
   }
 
-  // 5. Ukiyo-e Woodblock Scroll Portrait Synthesizer (2D Canvas)
   const portraitCache = new Map();
   function getUkiyoeScrollPortrait(id, title, kanji, grade, colorHex) {
     if (portraitCache.has(id)) return portraitCache.get(id);
@@ -325,13 +370,44 @@ export function downloadStandaloneSamuraiHTML() {
     return url;
   }
 
-  // 6. Scene, Camera, Lighting & Parametric Samurai Rig Setup
+  // Scene, Camera, Multi-Pass EffectComposer (RenderPass + UnrealBloomPass + Anisotropic Kuwahara & Sumi-e ShaderPass)
   const scene = new THREE.Scene();
   const camera = new THREE.PerspectiveCamera(44, window.innerWidth / window.innerHeight, 0.5, 160);
   const renderer = new THREE.WebGLRenderer({ antialias: true });
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   document.getElementById('mount').appendChild(renderer.domElement);
+
+  const composer = new EffectComposer(renderer);
+  composer.addPass(new RenderPass(scene, camera));
+  composer.addPass(new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.35, 0.4, 0.86));
+  const KuwaharaSumiShader = {
+    uniforms: {
+      tDiffuse: { value: null },
+      uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
+    },
+    vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
+    fragmentShader: \`
+      uniform sampler2D tDiffuse;
+      uniform vec2 uResolution;
+      varying vec2 vUv;
+      float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+      void main() {
+        vec2 tx = 1.0 / uResolution;
+        vec3 c = texture2D(tDiffuse, vUv).rgb;
+        vec3 tl = texture2D(tDiffuse, vUv + vec2(-1.0,-1.0)*tx).rgb;
+        vec3 tr = texture2D(tDiffuse, vUv + vec2( 1.0,-1.0)*tx).rgb;
+        vec3 bl = texture2D(tDiffuse, vUv + vec2(-1.0, 1.0)*tx).rgb;
+        vec3 br = texture2D(tDiffuse, vUv + vec2( 1.0, 1.0)*tx).rgb;
+        vec3 kuw = 0.2 * (c + tl + tr + bl + br);
+        float gx = -luma(tl) + luma(tr) - luma(bl) + luma(br);
+        float gy = -luma(tl) - luma(tr) + luma(bl) + luma(br);
+        float edge = smoothstep(0.12, 0.42, sqrt(gx*gx + gy*gy));
+        gl_FragColor = vec4(mix(mix(c, kuw, 0.45), vec3(0.05, 0.04, 0.03), edge * 0.85), 1.0);
+      }
+    \`
+  };
+  composer.addPass(new ShaderPass(KuwaharaSumiShader));
 
   const hemiLight = new THREE.HemisphereLight(0xe6dec8, 0x383b2e, 0.9);
   scene.add(hemiLight);
@@ -346,13 +422,30 @@ export function downloadStandaloneSamuraiHTML() {
   const armorGroup = new THREE.Group();
   const helmGroup = new THREE.Group();
   const rightArm = new THREE.Group();
-  rightArm.position.set(0.42, 1.38, 0);
+  const leftArm = new THREE.Group();
+  rightArm.position.set(0.28, 1.32, 0.14);
+  leftArm.position.set(-0.22, 1.24, 0.22);
   const weaponMount = new THREE.Group();
-  weaponMount.position.set(0, -0.42, 0.12);
-  weaponMount.rotation.x = Math.PI * 0.38;
-  rightArm.add(weaponMount);
-  playerRoot.add(armorGroup, helmGroup, rightArm);
+  weaponMount.position.set(0.08, 1.04, 0.34);
+  weaponMount.rotation.set(0.95, 0.08, 0.16);
+  playerRoot.add(armorGroup, helmGroup, rightArm, leftArm, weaponMount);
   scene.add(playerRoot);
+  let camModeIdx = 0;
+  const CAM_MODES = ['3rd-Person RPG (Over-Shoulder)', '1st-Person Samurai FPV (2-Hand Grip)', 'Isometric Tactical (45°)'];
+
+  // 3D Verlet Cloth Sheet for Samurai Haori Cloak
+  const clothCols = 8, clothRows = 10;
+  const clothGeo = new THREE.PlaneGeometry(0.68, 0.85, clothCols, clothRows);
+  const clothCurr = new Float32Array((clothCols+1)*(clothRows+1)*3);
+  const clothPrev = new Float32Array((clothCols+1)*(clothRows+1)*3);
+  for (let i = 0; i < clothGeo.attributes.position.count; i++) {
+    clothCurr[i*3] = clothPrev[i*3] = clothGeo.attributes.position.getX(i);
+    clothCurr[i*3+1] = clothPrev[i*3+1] = clothGeo.attributes.position.getY(i);
+    clothCurr[i*3+2] = clothPrev[i*3+2] = clothGeo.attributes.position.getZ(i);
+  }
+  const clothMesh = new THREE.Mesh(clothGeo, new THREE.MeshStandardMaterial({ color: 0x1e293b, side: THREE.DoubleSide }));
+  clothMesh.position.set(0, 1.38, -0.24);
+  playerRoot.add(clothMesh);
 
   let stageIdx = 0, isDojoMode = false;
   let primaryWep = WEAPONS[0], secondaryWep = WEAPONS[6], rangedWep = WEAPONS[11];
@@ -360,12 +453,12 @@ export function downloadStandaloneSamuraiHTML() {
   let curArmor = ARMORS[0], curHelm = HELMETS[0], curTool = THROWABLES[0];
   let toolStock = curTool.maxStock, toolCd = 0;
   let hp = 231, maxHp = 231, posture = 0, maxPosture = 174, ki = 120, maxKi = 120;
-  let score = 0, koku = 250, combo = 0, hitstop = 0, camTrauma = 0, zanshinZoom = 0;
+  let score = 0, koku = 250, combo = 0, comboStep = 0, hitstop = 0, camTrauma = 0, zanshinZoom = 0;
   let playerPos = new THREE.Vector3(0, 0, 12), playerVelY = 0, isGrounded = true, playerYaw = Math.PI;
   let atkCd = 0, atkAnim = 0, parryWin = 0, parryCd = 0;
 
   const AI_Brain = {
-    meleeSwings: [], meleeDmg: 10, rangedDmg: 0,
+    meleeSwings: [], meleeDmg: 10, rangedDmg: 0, jumps: 0,
     dodges: { left: 1, right: 1, back: 2, forward: 1 },
     parryHits: 1, parryTries: 2,
     getSnapshot(now) {
@@ -393,7 +486,6 @@ export function downloadStandaloneSamuraiHTML() {
     while (weaponMount.children.length) weaponMount.remove(weaponMount.children[0]);
 
     const pMat = createSumiMaterial(curArmor.primaryColor, 0.35, 0.45);
-    const aMat = createSumiMaterial(curArmor.accentColor, 0.25, 0.78);
     const skinMat = createSumiMaterial(0xe6ccb2, 0.6, 0.05);
     const legGeo = createSplineLathe([[0.01,0],[0.14,0.05],[0.18,0.45],[0.21,0.72],[0.01,0.75]], 40, 16);
     addPart(armorGroup, legGeo, pMat, [-0.21, 0, 0]);
@@ -446,7 +538,6 @@ export function downloadStandaloneSamuraiHTML() {
     enemies.forEach(e => scene.remove(e.mesh)); enemies.length = 0;
     bossSpawned = dojo;
 
-    // High-density vertex-displaced fractal ground terrain
     const groundGeo = new THREE.PlaneGeometry(180, 180, 96, 96);
     const posAttr = groundGeo.attributes.position;
     for (let i = 0; i < posAttr.count; i++) {
@@ -484,7 +575,7 @@ export function downloadStandaloneSamuraiHTML() {
           n++;
         }
       });
-      document.getElementById('stage-label').textContent = 'Stage ' + (stageIdx + 1) + '/5: ' + st.name + ' · ' + st.kanji;
+      document.getElementById('stage-label').textContent = 'Stage ' + (stageIdx + 1) + '/' + STAGES.length + ': ' + st.name + ' · ' + st.kanji;
     }
   }
 
@@ -499,6 +590,48 @@ export function downloadStandaloneSamuraiHTML() {
     el.textContent = txt;
     document.getElementById('float-layer').appendChild(el);
     setTimeout(() => el.remove(), 750);
+  }
+
+  // Hot-swap 3D GLB/GLTF/HDRI Asset Loader
+  function applyLoadedGLTF(gltf, slot, label) {
+    const model = gltf.scene;
+    const box = new THREE.Box3().setFromObject(model);
+    const sz = box.getSize(new THREE.Vector3());
+    const s = (slot === 'weapon' ? 1.3 : 1.85) / Math.max(0.01, sz.y);
+    model.scale.setScalar(s);
+    if (slot === 'weapon') {
+      while (weaponMount.children.length) weaponMount.remove(weaponMount.children[0]);
+      weaponMount.add(model);
+    } else if (slot === 'boss' && enemies[0]) {
+      while (enemies[0].mesh.children.length) enemies[0].mesh.remove(enemies[0].mesh.children[0]);
+      enemies[0].mesh.add(model);
+    } else {
+      while (armorGroup.children.length) armorGroup.remove(armorGroup.children[0]);
+      armorGroup.add(model);
+    }
+    document.getElementById('asset-telemetry').textContent = 'Loaded ' + label + ' (' + slot.toUpperCase() + ')';
+  }
+
+  function renderAssetPresets() {
+    const grid = document.getElementById('preset-grid');
+    grid.innerHTML = '';
+    ASSET_PRESETS.forEach(p => {
+      const d = document.createElement('div');
+      d.className = 'item-card';
+      d.innerHTML = '<div style="font-weight:700;font-size:12px;color:#38bdf8;">' + p.name + ' (' + p.kanji + ')</div>' +
+        '<div style="font-size:10px;color:#c7b79e;">' + p.sourceRepo + '</div>';
+      const b = document.createElement('button');
+      b.className = 'btn'; b.textContent = 'Load ' + p.format.toUpperCase() + ' (' + p.slot + ')';
+      b.onclick = () => {
+        if (p.url.startsWith('procedural://')) { rebuildPlayerRig(); return; }
+        if (p.format === 'hdr') {
+          rgbeLoader.load(p.url, tex => { tex.mapping = THREE.EquirectangularReflectionMapping; scene.environment = tex; });
+        } else {
+          gltfLoader.load(p.url, gltf => applyLoadedGLTF(gltf, p.slot, p.name));
+        }
+      };
+      d.appendChild(b); grid.appendChild(d);
+    });
   }
 
   function renderForge() {
@@ -527,30 +660,6 @@ export function downloadStandaloneSamuraiHTML() {
       };
       d.appendChild(b); grid.appendChild(d);
     });
-    ARMORS.forEach(a => {
-      const d = document.createElement('div');
-      d.className = 'item-card' + (curArmor.id === a.id ? ' active' : '');
-      const imgUrl = getUkiyoeScrollPortrait('armor_' + a.id, a.name, a.kanji, 'O-Yoroi Masterwork', a.primaryColor);
-      d.innerHTML = '<img class="portrait-img" src="' + imgUrl + '" alt="' + a.name + '" />' +
-        '<div style="font-weight:700;font-size:13px;color:#fbbf24;">[Do Armor] ' + a.name + ' (' + a.kanji + ')</div>' +
-        '<div style="font-size:10px;color:#c7b79e;">' + a.metricSpecs + '</div>';
-      const b = document.createElement('button');
-      b.className = 'btn'; b.textContent = curArmor.id === a.id ? 'Equipped' : 'Equip Armor';
-      b.onclick = () => { curArmor = a; rebuildPlayerRig(); renderForge(); };
-      d.appendChild(b); grid.appendChild(d);
-    });
-    HELMETS.forEach(h => {
-      const d = document.createElement('div');
-      d.className = 'item-card' + (curHelm.id === h.id ? ' active' : '');
-      const imgUrl = getUkiyoeScrollPortrait('helm_' + h.id, h.name, h.kanji, 'Kabuto Masterwork', h.crestColor);
-      d.innerHTML = '<img class="portrait-img" src="' + imgUrl + '" alt="' + h.name + '" />' +
-        '<div style="font-weight:700;font-size:13px;color:#38bdf8;">[Kabuto] ' + h.name + ' (' + h.kanji + ')</div>' +
-        '<div style="font-size:10px;color:#c7b79e;">' + h.metricSpecs + '</div>';
-      const b = document.createElement('button');
-      b.className = 'btn'; b.textContent = curHelm.id === h.id ? 'Equipped' : 'Equip Kabuto';
-      b.onclick = () => { curHelm = h; rebuildPlayerRig(); renderForge(); };
-      d.appendChild(b); grid.appendChild(d);
-    });
   }
 
   const keys = new Set();
@@ -566,45 +675,26 @@ export function downloadStandaloneSamuraiHTML() {
       activeSlot = slots[(slots.indexOf(activeSlot) + (e.code === 'KeyE' ? 1 : 2)) % 3];
       rebuildPlayerRig(); audio.slash(false);
     }
-    if (e.code === 'Digit1') { activeSlot = 'primary'; rebuildPlayerRig(); }
-    if (e.code === 'Digit2') { activeSlot = 'secondary'; rebuildPlayerRig(); }
-    if (e.code === 'Digit3') { activeSlot = 'ranged'; rebuildPlayerRig(); }
     if (e.code === 'Tab' || e.code === 'KeyI') {
       e.preventDefault();
       document.getElementById('modal').classList.toggle('open');
       renderForge();
     }
-    if (e.code === 'Escape') document.getElementById('modal').classList.remove('open');
-    if (e.code === 'Space' && isGrounded) { isGrounded = false; playerVelY = 11.2; }
-    if (e.code === 'KeyF') {
-      const staggered = enemies.find(en => en.state === 'stagger' && en.pos.distanceTo(playerPos) <= 4.2);
-      if (staggered) {
-        const dmg = Math.round(getActiveWeapon().damage * 3.2);
-        staggered.hp -= dmg; staggered.state = 'approach';
-        zanshinZoom = 0.55; hitstop = 0.095; camTrauma = 0.65;
-        koku += 50; score += dmg * 15;
-        audio.parry(); audio.slash(true);
-        pushFloat('残心 ZANSHIN EXECUTION! -' + dmg, staggered.pos, '#fbbf24');
-        return;
-      }
+    if (e.code === 'KeyL') {
+      document.getElementById('asset-modal').classList.toggle('open');
+      renderAssetPresets();
     }
-    if ((e.code === 'KeyR' || e.code === 'KeyF') && toolStock > 0 && toolCd <= 0) {
-      toolStock--; toolCd = curTool.cooldown;
-      AI_Brain.rangedDmg += curTool.damage;
-      const pm = new THREE.Mesh(createExtrudedBlade(0.28, 0.04, 0.01, 0), createSumiMaterial(0xfbbf24, 0.2, 0.9, true));
-      pm.position.copy(playerPos).setY(1.2);
-      scene.add(pm);
-      projectiles.push({ mesh: pm, pos: pm.position.clone(), vel: new THREE.Vector3(Math.sin(playerYaw)*28, 0, Math.cos(playerYaw)*28), dmg: curTool.damage, life: 1.5 });
-      rebuildPlayerRig();
+    if (e.code === 'KeyV') {
+      camModeIdx = (camModeIdx + 1) % 3;
+      document.getElementById('cam-mode-btn').textContent = '[V] Camera: ' + CAM_MODES[camModeIdx];
     }
+    if (e.code === 'Escape') {
+      document.getElementById('modal').classList.remove('open');
+      document.getElementById('asset-modal').classList.remove('open');
+    }
+    if (e.code === 'Space' && isGrounded) { isGrounded = false; playerVelY = 11.2; AI_Brain.jumps++; }
   });
   window.addEventListener('keyup', e => keys.delete(e.code));
-  window.addEventListener('wheel', e => {
-    if (document.getElementById('modal').classList.contains('open')) return;
-    const slots = ['primary','secondary','ranged'];
-    activeSlot = slots[(slots.indexOf(activeSlot) + (e.deltaY > 0 ? 1 : 2)) % 3];
-    rebuildPlayerRig();
-  });
   window.addEventListener('mousemove', e => {
     mouseNDC.x = (e.clientX / window.innerWidth) * 2 - 1;
     mouseNDC.y = -(e.clientY / window.innerHeight) * 2 + 1;
@@ -624,8 +714,8 @@ export function downloadStandaloneSamuraiHTML() {
           if (en.pos.distanceTo(playerPos) <= en.range + 2.2 && en.state === 'windup') {
             en.state = 'stagger'; en.timer = 1.6;
             AI_Brain.parryHits++; AI_Brain.parryTries++;
-            audio.parry(); hitstop = 0.065; camTrauma = 0.45;
-            pushFloat('PERFECT DEFLECT! [Press F Zanshin]', en.pos, '#fbbf24');
+            audio.parry(); hitstop = 0.06; camTrauma = 0.45;
+            pushFloat('弾き PERFECT DEFLECT!', en.pos, '#fbbf24');
           }
         });
       }
@@ -637,8 +727,15 @@ export function downloadStandaloneSamuraiHTML() {
     downAt = 0;
     if (atkCd > 0) return;
     const wep = getActiveWeapon();
+    comboStep = (comboStep + 1) % 3;
+    const isPlunge = !isGrounded && playerPos.y > 0.6;
+    const isThrust = keys.has('KeyW') && (keys.has('ShiftLeft') || keys.has('ShiftRight'));
+    const moveKey = isPlunge ? 'kabuto_wari' : isThrust ? 'tsuki_lunge' : heavy ? 'iaijutsu_charged' : comboStep === 1 ? 'kesa_giri' : comboStep === 2 ? 'gyaku_kesa' : 'tsumuji_kaze';
+    const moveDef = SIX_MOVES[moveKey];
+    document.getElementById('move-txt').textContent = 'Move ' + moveDef.moveNumber + '/6: ' + moveDef.name + ' · 8-Ray Hitbox';
+
     atkCd = (1 / wep.speed) * (heavy ? 1.3 : 0.88);
-    atkAnim = 0.26;
+    atkAnim = moveDef.durationSec;
     if (mouseWorld.lengthSq() > 0.1) playerYaw = Math.atan2(mouseWorld.x - playerPos.x, mouseWorld.z - playerPos.z);
 
     if (wep.category === 'ranged') {
@@ -653,7 +750,7 @@ export function downloadStandaloneSamuraiHTML() {
 
     AI_Brain.meleeSwings.push(performance.now());
     AI_Brain.meleeDmg += wep.damage;
-    audio.slash(heavy);
+    audio.slash(heavy || isPlunge);
 
     const arcRad = THREE.MathUtils.degToRad(wep.swingArcDeg);
     const tMesh = new THREE.Mesh(
@@ -668,16 +765,10 @@ export function downloadStandaloneSamuraiHTML() {
 
     enemies.forEach(en => {
       if (en.pos.distanceTo(playerPos) <= wep.reach + 1.0) {
-        const snap = AI_Brain.getSnapshot(performance.now());
-        if (!heavy && !en.isDummy && Math.random() < snap.autoParry * 0.4) {
-          audio.parry(); pushFloat('AI DEFLECTED!', en.pos, '#fbbf24');
-          en.state = 'windup'; en.timer = 0.28;
-          return;
-        }
-        const dmg = Math.round(wep.damage * (heavy ? 1.6 : 1.0));
+        const dmg = Math.round(wep.damage * moveDef.damageMultiplier);
         en.hp -= dmg; combo++; score += dmg * 10;
         if (en.isDummy && en.hp <= 150) { en.hp = en.maxHp; pushFloat('DUMMY RESET (稽古継続)', en.pos, '#34d399'); }
-        else pushFloat('-' + dmg, en.pos, heavy ? '#fbbf24' : '#f87171');
+        else pushFloat(moveDef.kanji + ' -' + dmg, en.pos, heavy ? '#fbbf24' : '#f87171');
       }
     });
   });
@@ -687,12 +778,34 @@ export function downloadStandaloneSamuraiHTML() {
     activeSlot = slots[(slots.indexOf(activeSlot) + 1) % 3];
     rebuildPlayerRig();
   };
+  document.getElementById('cam-mode-btn').onclick = () => {
+    camModeIdx = (camModeIdx + 1) % 3;
+    document.getElementById('cam-mode-btn').textContent = '[V] Camera: ' + CAM_MODES[camModeIdx];
+  };
   document.getElementById('dojo-mode-btn').onclick = () => {
     loadStage(stageIdx, !isDojoMode);
     document.getElementById('dojo-mode-btn').textContent = isDojoMode ? 'Return to Campaign · 出陣' : 'Dojo Training Mode · 稽古道場';
   };
   document.getElementById('open-forge-btn').onclick = () => { document.getElementById('modal').classList.add('open'); renderForge(); };
   document.getElementById('close-forge-btn').onclick = () => document.getElementById('modal').classList.remove('open');
+  document.getElementById('open-asset-btn').onclick = () => { document.getElementById('asset-modal').classList.add('open'); renderAssetPresets(); };
+  document.getElementById('close-asset-btn').onclick = () => document.getElementById('asset-modal').classList.remove('open');
+  document.getElementById('load-url-btn').onclick = () => {
+    const url = document.getElementById('asset-url-input').value.trim();
+    const slot = document.getElementById('asset-slot-sel').value;
+    if (!url) return;
+    if (slot === 'hdri' || url.endsWith('.hdr')) {
+      rgbeLoader.load(url, tex => { tex.mapping = THREE.EquirectangularReflectionMapping; scene.environment = tex; });
+    } else {
+      gltfLoader.load(url, gltf => applyLoadedGLTF(gltf, slot, url));
+    }
+  };
+  document.getElementById('asset-file-input').onchange = async (e) => {
+    const f = e.target.files[0]; if (!f) return;
+    const slot = document.getElementById('asset-slot-sel').value;
+    const buf = await f.arrayBuffer();
+    gltfLoader.parse(buf, '', gltf => applyLoadedGLTF(gltf, slot, f.name));
+  };
 
   rebuildPlayerRig();
   loadStage(0, false);
@@ -701,15 +814,13 @@ export function downloadStandaloneSamuraiHTML() {
   function loop(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
-    if (hitstop > 0) { hitstop -= dt; renderer.render(scene, camera); requestAnimationFrame(loop); return; }
+    if (hitstop > 0) { hitstop -= dt; composer.render(); requestAnimationFrame(loop); return; }
 
+    physicsWorld.step(1 / 60, dt, 3);
     atkCd = Math.max(0, atkCd - dt);
     atkAnim = Math.max(0, atkAnim - dt);
     parryWin = Math.max(0, parryWin - dt);
     parryCd = Math.max(0, parryCd - dt);
-    toolCd = Math.max(0, toolCd - dt);
-    zanshinZoom = Math.max(0, zanshinZoom - dt);
-    posture = Math.max(0, posture - 10 * dt);
 
     let mx = 0, mz = 0;
     if (keys.has('KeyW')) mz -= 1;
@@ -734,10 +845,25 @@ export function downloadStandaloneSamuraiHTML() {
     }
     playerRoot.position.copy(playerPos);
     playerRoot.rotation.y = playerYaw;
-    rightArm.rotation.x = atkAnim > 0 ? -Math.PI * 0.6 + Math.sin((1 - atkAnim / 0.26) * Math.PI) * 1.6 : 0;
+    rightArm.rotation.x = atkAnim > 0 ? -Math.PI * 0.6 + Math.sin((1 - atkAnim / 0.28) * Math.PI) * 1.6 : 0;
+
+    // Step 3D Verlet Cloth Sheet for Haori Cloak
+    const cPos = clothGeo.attributes.position;
+    for (let i = clothCols + 1; i < cPos.count; i++) {
+      const iz = i * 3 + 2;
+      const cz = clothCurr[iz];
+      const vz = (cz - clothPrev[iz]) * 0.96;
+      clothPrev[iz] = cz;
+      clothCurr[iz] = cz + vz + Math.sin(now * 0.006 + i * 0.4) * 0.002 - 0.001;
+      cPos.setZ(i, clothCurr[iz]);
+    }
+    cPos.needsUpdate = true;
 
     for (let i = projectiles.length - 1; i >= 0; i--) {
       const p = projectiles[i]; p.life -= dt;
+      // Quadratic Aerodynamic Drag: F_drag = -0.5 * rho * ||v|| * v * C_d * A
+      const spd = p.vel.length();
+      p.vel.addScaledVector(p.vel, -0.5 * 1.225 * spd * 0.35 * 0.008 * dt);
       p.pos.addScaledVector(p.vel, dt); p.mesh.position.copy(p.pos);
       for (const en of enemies) {
         if (en.pos.distanceTo(p.pos) < 1.1) {
@@ -758,9 +884,6 @@ export function downloadStandaloneSamuraiHTML() {
       const en = enemies[i];
       if (en.hp <= 0) {
         koku += en.isBoss ? 120 : 25;
-        const dec = new THREE.Mesh(new THREE.PlaneGeometry(2.5, 2.5), new THREE.MeshBasicMaterial({ map: textures.splatterTex, transparent: true, opacity: 0.85, depthWrite: false }));
-        dec.rotation.x = -Math.PI / 2; dec.position.set(en.pos.x, 0.025, en.pos.z);
-        envGroup.add(dec);
         scene.remove(en.mesh); enemies.splice(i, 1); continue;
       }
       en.timer -= dt;
@@ -815,15 +938,29 @@ export function downloadStandaloneSamuraiHTML() {
     document.getElementById('boss-label').textContent = 'Score ' + score + ' · Koku ' + koku + '石 · Combo ' + combo + 'x · Foes ' + enemies.length;
     document.getElementById('ai-stance').textContent = snap.stance;
     document.getElementById('ai-callout').textContent = snap.callout;
-    document.getElementById('ai-metrics').textContent = 'Spam: ' + Math.round(snap.spam*100) + '% | Ranged: ' + Math.round(snap.ranged*100) + '% | Dodge: ' + snap.prefDodge.toUpperCase();
+    document.getElementById('ai-metrics').textContent = '[R_m:' + Math.round(snap.spam*100) + '% R_r:' + Math.round(snap.ranged*100) + '% D:' + snap.prefDodge.toUpperCase() + ']';
 
     camTrauma = Math.max(0, camTrauma - dt * 2.2);
-    const sh = camTrauma * camTrauma * 0.6;
-    const zoomOff = zanshinZoom > 0 ? -5.0 : 0;
-    camera.position.set(playerPos.x + (Math.random()-0.5)*sh, 15.5 + zoomOff, playerPos.z + 14.5 + zoomOff);
-    camera.lookAt(playerPos.x, 1, playerPos.z - 1.5);
+    const sh = camTrauma * camTrauma * 0.45;
+    helmGroup.visible = camModeIdx !== 1;
+    if (camModeIdx === 0) {
+      // Mode 1: Over-the-Shoulder 3rd-Person RPG View
+      const fx = Math.sin(playerYaw), fz = Math.cos(playerYaw);
+      const rx = Math.cos(playerYaw), rz = -Math.sin(playerYaw);
+      camera.position.set(playerPos.x - fx * 3.45 + rx * 0.65 + (Math.random()-0.5)*sh, playerPos.y + 1.78, playerPos.z - fz * 3.45 + rz * 0.65);
+      camera.lookAt(playerPos.x + fx * 12, playerPos.y + 1.45, playerPos.z + fz * 12);
+    } else if (camModeIdx === 1) {
+      // Mode 2: 1st-Person Samurai FPV
+      const fx = Math.sin(playerYaw), fz = Math.cos(playerYaw);
+      camera.position.set(playerPos.x + fx * 0.14, playerPos.y + 1.58, playerPos.z + fz * 0.14);
+      camera.lookAt(playerPos.x + fx * 14, playerPos.y + 1.42, playerPos.z + fz * 14);
+    } else {
+      // Mode 3: Isometric Tactical View
+      camera.position.set(playerPos.x + (Math.random()-0.5)*sh, playerPos.y + 15.2, playerPos.z + 14.2);
+      camera.lookAt(playerPos.x, playerPos.y + 1, playerPos.z - 1.5);
+    }
 
-    renderer.render(scene, camera);
+    composer.render();
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);

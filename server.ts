@@ -226,6 +226,64 @@ app.post('/api/generate-scroll-art', async (req, res) => {
   }
 });
 
+// Pipeline 3: Nano Banana Pro (gemini-3-pro-image-preview) Seamless PBR Material Synthesizer
+app.post('/api/nano-banana-pbr', async (req, res) => {
+  try {
+    const { presetId, prompt, targetSlot } = req.body;
+    const ai = getGenAIClient();
+
+    if (!ai) {
+      return res.status(200).json({
+        fallbackProcedural: true,
+        presetId,
+        targetSlot,
+        model: 'procedural-sobel-scharr-pbr',
+        message: 'Synthesizing deterministic 4-map PBR bundle (Albedo, Scharr Normal, Parallax Height, Cavity/Roughness).',
+      });
+    }
+
+    const pbrPrompt =
+      prompt ||
+      'Seamless tileable 4K PBR texture of folded Tamahagane Damascus steel with wavy Hamon temper line, orthographic top-down flat surface lighting, micro-scratches, high-frequency surface relief.';
+
+    const response = await ai.models.generateContent({
+      model: 'gemini-3-pro-image-preview',
+      contents: pbrPrompt,
+      config: {
+        responseModalities: [Modality.IMAGE, Modality.TEXT],
+      },
+    });
+
+    const parts = response.candidates?.[0]?.content?.parts || [];
+    for (const part of parts) {
+      if (part.inlineData?.data) {
+        return res.json({
+          fallbackProcedural: false,
+          presetId,
+          targetSlot,
+          model: 'gemini-3-pro-image-preview',
+          mimeType: part.inlineData.mimeType || 'image/png',
+          imageBase64: part.inlineData.data,
+        });
+      }
+    }
+
+    return res.status(200).json({
+      fallbackProcedural: true,
+      presetId,
+      targetSlot,
+      model: 'procedural-sobel-scharr-pbr',
+      message: 'Nano Banana Pro returned no image bytes; using deterministic Sobel-Scharr 4-map PBR generator.',
+    });
+  } catch (err: any) {
+    return res.status(200).json({
+      fallbackProcedural: true,
+      model: 'procedural-sobel-scharr-pbr',
+      message: err?.message || 'Using deterministic Sobel-Scharr 4-map PBR generator.',
+    });
+  }
+});
+
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({

@@ -1,0 +1,194 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Helpers
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isOwner(userId) {
+      return isVerifiedUser() && request.auth.uid == userId;
+    }
+
+    // 3. Entity Validation Blueprints (Anti-Update-Gap)
+    function isValidSamuraiProfile(data) {
+      return data.keys().hasAll([
+        'ownerUid',
+        'displayName',
+        'bestScore',
+        'koku',
+        'highestUnlockedStage',
+        'primaryWeaponId',
+        'secondaryWeaponId',
+        'rangedWeaponId',
+        'armorId',
+        'helmetId',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'ownerUid',
+        'displayName',
+        'bestScore',
+        'koku',
+        'highestUnlockedStage',
+        'primaryWeaponId',
+        'secondaryWeaponId',
+        'rangedWeaponId',
+        'armorId',
+        'helmetId',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.ownerUid == request.auth.uid &&
+      isValidId(data.ownerUid) &&
+      data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 64 &&
+      data.bestScore is int && data.bestScore >= 0 && data.bestScore <= 100000000 &&
+      data.koku is int && data.koku >= 0 && data.koku <= 100000000 &&
+      data.highestUnlockedStage is int && data.highestUnlockedStage >= 0 && data.highestUnlockedStage <= 9 &&
+      isValidId(data.primaryWeaponId) && data.primaryWeaponId.size() <= 64 &&
+      isValidId(data.secondaryWeaponId) && data.secondaryWeaponId.size() <= 64 &&
+      isValidId(data.rangedWeaponId) && data.rangedWeaponId.size() <= 64 &&
+      isValidId(data.armorId) && data.armorId.size() <= 64 &&
+      isValidId(data.helmetId) && data.helmetId.size() <= 64 &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    function isValidCombatRunRecord(data) {
+      return data.keys().hasAll([
+        'ownerUid',
+        'stageIndex',
+        'score',
+        'weaponUsed',
+        'aiStance',
+        'status',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.keys().hasOnly([
+        'ownerUid',
+        'stageIndex',
+        'score',
+        'weaponUsed',
+        'aiStance',
+        'status',
+        'createdAt',
+        'updatedAt'
+      ]) &&
+      data.ownerUid == request.auth.uid &&
+      isValidId(data.ownerUid) &&
+      data.stageIndex is int && data.stageIndex >= 0 && data.stageIndex <= 9 &&
+      data.score is int && data.score >= 0 && data.score <= 100000000 &&
+      isValidId(data.weaponUsed) && data.weaponUsed.size() <= 64 &&
+      data.aiStance is string && data.aiStance.size() >= 1 && data.aiStance.size() <= 80 &&
+      (data.status == 'active' || data.status == 'completed') &&
+      data.createdAt is timestamp &&
+      data.updatedAt is timestamp;
+    }
+
+    // 4. Master Collection: /users/{userId}
+    match /users/{userId} {
+      allow get: if isOwner(userId) && isValidId(userId) && (resource == null || existing().ownerUid == request.auth.uid);
+
+      allow create: if isOwner(userId) &&
+        isValidId(userId) &&
+        isValidSamuraiProfile(incoming()) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+
+      allow update: if isSignedIn() &&
+        isValidSamuraiProfile(incoming()) &&
+        isOwner(userId) &&
+        isValidId(userId) &&
+        incoming().ownerUid == existing().ownerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          // Action 1: Update Progression & Loadout
+          incoming().diff(existing()).affectedKeys().hasOnly([
+            'displayName',
+            'bestScore',
+            'koku',
+            'highestUnlockedStage',
+            'primaryWeaponId',
+            'secondaryWeaponId',
+            'rangedWeaponId',
+            'armorId',
+            'helmetId',
+            'updatedAt'
+          ])
+        );
+
+      allow delete: if isOwner(userId) && isValidId(userId) && existing().ownerUid == request.auth.uid;
+
+      // 5. Subcollection: /users/{userId}/runs/{runId}
+      match /runs/{runId} {
+        allow get: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(runId) &&
+          (resource == null || existing().ownerUid == request.auth.uid) &&
+          get(/databases/$(database)/documents/users/$(userId)).data.ownerUid == request.auth.uid;
+
+        allow list: if isOwner(userId) &&
+          resource.data.ownerUid == request.auth.uid;
+
+        allow create: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(runId) &&
+          isValidCombatRunRecord(incoming()) &&
+          incoming().createdAt == request.time &&
+          incoming().updatedAt == request.time &&
+          exists(/databases/$(database)/documents/users/$(userId)) &&
+          get(/databases/$(database)/documents/users/$(userId)).data.ownerUid == request.auth.uid;
+
+        allow update: if isSignedIn() &&
+          isValidCombatRunRecord(incoming()) &&
+          isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(runId) &&
+          existing().status != 'completed' &&
+          incoming().ownerUid == existing().ownerUid &&
+          incoming().createdAt == existing().createdAt &&
+          incoming().updatedAt == request.time &&
+          get(/databases/$(database)/documents/users/$(userId)).data.ownerUid == request.auth.uid &&
+          (
+            // Action: Complete or update run score
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'score',
+              'aiStance',
+              'status',
+              'updatedAt'
+            ])
+          );
+
+        allow delete: if isOwner(userId) &&
+          isValidId(userId) &&
+          isValidId(runId) &&
+          existing().ownerUid == request.auth.uid &&
+          get(/databases/$(database)/documents/users/$(userId)).data.ownerUid == request.auth.uid;
+      }
+    }
+  }
+}

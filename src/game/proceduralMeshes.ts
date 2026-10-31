@@ -14,6 +14,7 @@ export interface ProceduralTextures {
   washiAlbedo: THREE.CanvasTexture;
   washiBump: THREE.CanvasTexture;
   washiNormal: THREE.CanvasTexture;
+  washiRoughness: THREE.CanvasTexture;
   tamahaganeTex: THREE.CanvasTexture;
   toonGradient: THREE.DataTexture;
   contactShadowTex: THREE.CanvasTexture;
@@ -26,7 +27,7 @@ let cachedTextures: ProceduralTextures | null = null;
 export function createProceduralTextures(maxAnisotropy = 4): ProceduralTextures {
   if (cachedTextures) return cachedTextures;
 
-  // 1. High-Resolution Washi Paper Fiber Albedo, Roughness & Normal Map (Mulberry / Kozo Fibers)
+  // 1. High-Resolution Washi Paper, Rock & Bark Relief Canvas (512x512)
   const washiCanvas = document.createElement('canvas');
   washiCanvas.width = 512;
   washiCanvas.height = 512;
@@ -35,29 +36,29 @@ export function createProceduralTextures(maxAnisotropy = 4): ProceduralTextures 
   ctx.fillRect(0, 0, 512, 512);
 
   // Subtle wet ink cloud patches (Sumi-e bokashi wash)
-  for (let i = 0; i < 18; i++) {
-    const cx = Math.random() * 512;
-    const cy = Math.random() * 512;
-    const r = 36 + Math.random() * 76;
-    ctx.fillStyle = i % 2 === 0 ? 'rgba(130, 108, 82, 0.06)' : 'rgba(255, 250, 238, 0.09)';
+  for (let i = 0; i < 24; i++) {
+    const cx = ((i * 137) % 512);
+    const cy = ((i * 293) % 512);
+    const r = 36 + (i % 5) * 16;
+    ctx.fillStyle = i % 2 === 0 ? 'rgba(120, 98, 72, 0.08)' : 'rgba(255, 250, 238, 0.11)';
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.fill();
   }
 
-  // Organic intertwined Mulberry / Kozo Washi fibers
-  for (let i = 0; i < 1600; i++) {
+  // Organic intertwined Mulberry / Kozo Washi & Rock Micro-Grain
+  for (let i = 0; i < 1800; i++) {
     const x = Math.random() * 512;
     const y = Math.random() * 512;
     const len = 10 + Math.random() * 38;
     const angle = Math.random() * Math.PI * 2;
     ctx.strokeStyle =
-      i % 7 === 0
-        ? 'rgba(88, 68, 46, 0.20)'
+      i % 6 === 0
+        ? 'rgba(72, 56, 38, 0.26)'
         : i % 3 === 0
-          ? 'rgba(255, 251, 242, 0.34)'
-          : 'rgba(158, 134, 102, 0.16)';
-    ctx.lineWidth = 0.5 + Math.random() * 1.5;
+          ? 'rgba(255, 251, 242, 0.36)'
+          : 'rgba(148, 124, 92, 0.20)';
+    ctx.lineWidth = 0.7 + Math.random() * 1.6;
     ctx.beginPath();
     ctx.moveTo(x, y);
     ctx.quadraticCurveTo(
@@ -82,32 +83,90 @@ export function createProceduralTextures(maxAnisotropy = 4): ProceduralTextures 
   washiBump.repeat.set(6, 6);
   washiBump.anisotropy = maxAnisotropy;
 
-  // Tangent-Space Washi Paper Fiber Normal Map (#8080ff base with relief tangents)
+  // Compute True Tangent-Space Sobel Normal Map N = normalize(-dH/du, -dH/dv, 1) & Roughness Map
+  const nSize = 256;
   const normCanvas = document.createElement('canvas');
-  normCanvas.width = 256;
-  normCanvas.height = 256;
+  normCanvas.width = nSize;
+  normCanvas.height = nSize;
   const nCtx = normCanvas.getContext('2d')!;
-  nCtx.fillStyle = 'rgb(128, 128, 255)';
-  nCtx.fillRect(0, 0, 256, 256);
-  for (let i = 0; i < 900; i++) {
-    const x = Math.random() * 256;
-    const y = Math.random() * 256;
-    const len = 8 + Math.random() * 22;
-    const a = Math.random() * Math.PI * 2;
-    const nx = Math.round(128 + Math.cos(a) * 32);
-    const ny = Math.round(128 + Math.sin(a) * 32);
-    nCtx.strokeStyle = `rgb(${nx}, ${ny}, 245)`;
-    nCtx.lineWidth = 1.1;
-    nCtx.beginPath();
-    nCtx.moveTo(x, y);
-    nCtx.lineTo(x + Math.cos(a) * len, y + Math.sin(a) * len);
-    nCtx.stroke();
+  nCtx.drawImage(washiCanvas, 0, 0, nSize, nSize);
+
+  const roughCanvas = document.createElement('canvas');
+  roughCanvas.width = nSize;
+  roughCanvas.height = nSize;
+  const rCtx = roughCanvas.getContext('2d')!;
+
+  const srcImg = nCtx.getImageData(0, 0, nSize, nSize);
+  const srcPixels = srcImg.data;
+  const heightField = new Float32Array(nSize * nSize);
+  for (let i = 0; i < nSize * nSize; i++) {
+    heightField[i] =
+      (srcPixels[i * 4] * 0.299 + srcPixels[i * 4 + 1] * 0.587 + srcPixels[i * 4 + 2] * 0.114) /
+      255.0;
   }
+
+  const normOut = nCtx.createImageData(nSize, nSize);
+  const roughOut = rCtx.createImageData(nSize, nSize);
+  const nd = normOut.data;
+  const rd = roughOut.data;
+  const sobelStrength = 4.2;
+
+  const sampleH = (x: number, y: number): number => {
+    const wx = ((x % nSize) + nSize) % nSize;
+    const wy = ((y % nSize) + nSize) % nSize;
+    return heightField[wy * nSize + wx];
+  };
+
+  for (let y = 0; y < nSize; y++) {
+    for (let x = 0; x < nSize; x++) {
+      const tl = sampleH(x - 1, y - 1);
+      const tc = sampleH(x, y - 1);
+      const tr = sampleH(x + 1, y - 1);
+      const ml = sampleH(x - 1, y);
+      const mr = sampleH(x + 1, y);
+      const bl = sampleH(x - 1, y + 1);
+      const bc = sampleH(x, y + 1);
+      const br = sampleH(x + 1, y + 1);
+
+      const dX = tr + 2 * mr + br - (tl + 2 * ml + bl);
+      const dY = bl + 2 * bc + br - (tl + 2 * tc + tr);
+      let nx = -dX * sobelStrength;
+      let ny = -dY * sobelStrength;
+      let nz = 1.0;
+      const invLen = 1.0 / Math.max(1e-5, Math.hypot(nx, ny, nz));
+      nx *= invLen;
+      ny *= invLen;
+      nz *= invLen;
+
+      const idx = (y * nSize + x) * 4;
+      nd[idx] = Math.round((nx * 0.5 + 0.5) * 255);
+      nd[idx + 1] = Math.round((ny * 0.5 + 0.5) * 255);
+      nd[idx + 2] = Math.round((nz * 0.5 + 0.5) * 255);
+      nd[idx + 3] = 255;
+
+      const hVal = heightField[y * nSize + x];
+      const slopeMag = Math.min(1, Math.hypot(dX, dY) * 2.5);
+      const roughByte = Math.round(Math.max(45, Math.min(245, (1.0 - hVal * 0.45 + slopeMag * 0.35) * 215)));
+      rd[idx] = roughByte;
+      rd[idx + 1] = roughByte;
+      rd[idx + 2] = roughByte;
+      rd[idx + 3] = 255;
+    }
+  }
+  nCtx.putImageData(normOut, 0, 0);
+  rCtx.putImageData(roughOut, 0, 0);
+
   const washiNormal = new THREE.CanvasTexture(normCanvas);
   washiNormal.wrapS = THREE.RepeatWrapping;
   washiNormal.wrapT = THREE.RepeatWrapping;
   washiNormal.repeat.set(6, 6);
   washiNormal.anisotropy = maxAnisotropy;
+
+  const washiRoughness = new THREE.CanvasTexture(roughCanvas);
+  washiRoughness.wrapS = THREE.RepeatWrapping;
+  washiRoughness.wrapT = THREE.RepeatWrapping;
+  washiRoughness.repeat.set(6, 6);
+  washiRoughness.anisotropy = maxAnisotropy;
 
   // 2. Tamahagane Folded Damascus Steel & Wavy Martensite Hamon Line Texture
   const steelCanvas = document.createElement('canvas');
@@ -115,16 +174,16 @@ export function createProceduralTextures(maxAnisotropy = 4): ProceduralTextures 
   steelCanvas.height = 128;
   const stCtx = steelCanvas.getContext('2d')!;
   const stGrad = stCtx.createLinearGradient(0, 0, 0, 128);
-  stGrad.addColorStop(0, '#94a3b8');
-  stGrad.addColorStop(0.65, '#cbd5e1');
-  stGrad.addColorStop(0.82, '#f8fafc');
+  stGrad.addColorStop(0, '#64748b');
+  stGrad.addColorStop(0.58, '#cbd5e1');
+  stGrad.addColorStop(0.78, '#f8fafc');
   stGrad.addColorStop(1, '#ffffff');
   stCtx.fillStyle = stGrad;
   stCtx.fillRect(0, 0, 512, 128);
 
   // Damascus Jihada wood-grain folded steel layers
-  stCtx.strokeStyle = 'rgba(51, 65, 85, 0.22)';
-  stCtx.lineWidth = 1.0;
+  stCtx.strokeStyle = 'rgba(30, 41, 59, 0.28)';
+  stCtx.lineWidth = 1.1;
   for (let w = 0; w < 28; w++) {
     stCtx.beginPath();
     const baseY = (w / 28) * 90;
@@ -137,11 +196,11 @@ export function createProceduralTextures(maxAnisotropy = 4): ProceduralTextures 
   }
 
   // Wavy Gunome-Midare Hamon Martensite Temper Line along the cutting edge
-  stCtx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
-  stCtx.lineWidth = 3.2;
+  stCtx.strokeStyle = 'rgba(255, 255, 255, 0.98)';
+  stCtx.lineWidth = 3.6;
   stCtx.beginPath();
   for (let x = 0; x <= 512; x += 4) {
-    const y = 96 + Math.sin(x * 0.085) * 7 + Math.cos(x * 0.21) * 3.5;
+    const y = 94 + Math.sin(x * 0.085) * 7 + Math.cos(x * 0.21) * 3.5;
     if (x === 0) stCtx.moveTo(x, y);
     else stCtx.lineTo(x, y);
   }
@@ -227,6 +286,7 @@ export function createProceduralTextures(maxAnisotropy = 4): ProceduralTextures 
     washiAlbedo,
     washiBump,
     washiNormal,
+    washiRoughness,
     tamahaganeTex,
     toonGradient,
     contactShadowTex,
@@ -237,7 +297,7 @@ export function createProceduralTextures(maxAnisotropy = 4): ProceduralTextures 
 }
 
 // ============================================================================
-// CUSTOM GLSL KAMI-E & SUMI-E PBR SHADER PIPELINE (Washi Normal + Urushi Clearcoat + Ink Rim)
+// CUSTOM GLSL KAMI-E & SUMI-E PBR SHADER PIPELINE (Sobel Normal + Roughness + Urushi Clearcoat)
 // ============================================================================
 export function createSumiWashiMaterial(
   colorHex: number,
@@ -251,9 +311,10 @@ export function createSumiWashiMaterial(
     roughness,
     metalness,
     normalMap: textures.washiNormal,
-    normalScale: new THREE.Vector2(0.35, 0.35),
+    normalScale: new THREE.Vector2(2.2, 2.2),
+    roughnessMap: textures.washiRoughness,
     bumpMap: textures.washiBump,
-    bumpScale: 0.022,
+    bumpScale: 0.032,
     emissive: emissiveHex,
     emissiveIntensity: emissiveHex ? 0.55 : 0,
   });
@@ -290,15 +351,19 @@ export function createUrushiLacquerMaterial(
   isTamahaganeBlade = false
 ): THREE.MeshPhysicalMaterial {
   return new THREE.MeshPhysicalMaterial({
-    color: colorHex,
+    color: isTamahaganeBlade ? 0xffffff : colorHex,
     map: isTamahaganeBlade ? textures.tamahaganeTex : null,
-    metalness: isTamahaganeBlade ? 0.96 : 0.45,
-    roughness: isTamahaganeBlade ? 0.14 : 0.22,
+    vertexColors: isTamahaganeBlade,
+    metalness: isTamahaganeBlade ? 0.94 : 0.45,
+    roughness: isTamahaganeBlade ? 0.15 : 0.24,
+    roughnessMap: textures.washiRoughness,
     clearcoat: 1.0,
     clearcoatRoughness: 0.06,
     reflectivity: 0.95,
     normalMap: textures.washiNormal,
-    normalScale: new THREE.Vector2(isTamahaganeBlade ? 0.12 : 0.35, isTamahaganeBlade ? 0.12 : 0.35),
+    normalScale: new THREE.Vector2(isTamahaganeBlade ? 1.25 : 2.2, isTamahaganeBlade ? 1.25 : 2.2),
+    bumpMap: textures.washiBump,
+    bumpScale: isTamahaganeBlade ? 0.012 : 0.026,
   });
 }
 
@@ -558,7 +623,7 @@ function createOrnateTsubaGeometry(radius: number, thickness: number, isSquare =
   return geo;
 }
 
-function createTubularPathGeometry(
+export function createTubularPathGeometry(
   points: [number, number, number][],
   radius: number,
   tubularSegments = 48,
@@ -572,7 +637,9 @@ function createTubularPathGeometry(
 
 // ============================================================================
 // EXACT MATHEMATICAL PARAMETRIC SURFACES:
-// 1. Shinogi-Zukuri 6-Plane Hexagonal Blade Cross-Section + Parabolic Sori
+// 1. Unified 5-Vertex Shinogi-Zukuri Single-Edged Blade + Parabolic Sori Curve
+//    y_curve(t) = S * t^2,  y_axis(t) = t * L   (t in [0, 1])
+//    with Integrated Wavy Gunome-Midare Hamon Vertex Attributes (ZERO Split Edges!)
 // 2. Fourier Harmonic Pleated Hakama Trousers Surface
 // 3. Woven Bamboo Kasa Spiral Hat Surface
 // 4. Hyperbolic Catenary Irimoya-Zukuri Castle/Pagoda Roof Surface
@@ -582,56 +649,176 @@ export function createShinogiZukuriBladeGeometry(
   motoWidth: number,
   soriMax: number,
   thickness = 0.018,
-  zSegments = 40
+  zSegments = 48
 ): THREE.BufferGeometry {
-  // 6-Plane Cross-Section per slice:
-  // 0: Spine (Mune), 1: Left Shinogi Ridge, 2: Cutting Edge (Ha), 3: Right Shinogi Ridge
+  // Single Unified 5-Vertex Shinogi-Zukuri Pentagonal Cross-Section per slice t in [0, 1]:
+  // v0: Blunt Back Spine (Mune)
+  // v1: Right Shinogi Ridge (+X)
+  // v2: Single Razor Cutting Edge (Ha) with Wavy Hamon Temper Line
+  // v3: Left Shinogi Ridge (-X)
+  // v4: Blunt Back Spine Closure (Mune, UV seam)
   const positions: number[] = [];
+  const colors: number[] = [];
   const uvs: number[] = [];
   const indices: number[] = [];
 
   for (let i = 0; i <= zSegments; i++) {
-    const u = i / zSegments;
-    const y = u * length;
-    const { soriY, width } = evaluateShinogiZukuriProfile(y, length, motoWidth, soriMax);
-    const curThick = thickness * (1 - 0.32 * u) * (u > 0.95 ? (1 - u) * 20 : 1);
+    const t = i / zSegments;
+    const y = t * length;
+
+    // Exact Single Parabolic Sori Curve: z_curve(t) = S * t^2
+    const soriOffset = soriMax * (t * t);
+
+    // Smooth taper from Moto-haba (base) to Saki-haba, converging to a single sharp Kissaki point at t = 1
+    const kissakiTaper = t > 0.88 ? Math.max(0.008, 1.0 - (t - 0.88) / 0.12) : 1.0;
+    const width = motoWidth * (1.0 - 0.28 * t) * kissakiTaper;
+    const curThick = thickness * (1.0 - 0.34 * t) * kissakiTaper;
     const halfT = curThick * 0.5;
 
-    const zMune = -width * 0.5 + soriY;
-    const zShinogi = -width * 0.12 + soriY;
-    const zHa = width * 0.5 + soriY;
+    // All 5 cross-section vertices share the EXACT same parabolic soriOffset
+    const zMune = soriOffset - width * 0.5;
+    const zShinogi = soriOffset - width * 0.08;
+    const zHa = soriOffset + width * 0.5;
 
-    // 4 vertices around diamond/hexagonal cross-section
-    // v0: Mune (back spine)
+    // Wavy Gunome-Midare Hamon Martensite Temper Line Modulation along blade length
+    const hamonWave = 0.92 + 0.08 * Math.sin(t * 44.0 + Math.cos(t * 19.0) * 1.5);
+
+    // v0: Mune (blunt back spine — dark folded Jihada steel)
     positions.push(0, y, zMune);
-    uvs.push(u, 0);
-    // v1: +X Shinogi ridge
+    colors.push(0.42, 0.48, 0.56);
+    uvs.push(t, 0.0);
+
+    // v1: +X Shinogi ridge (polished steel ridge)
     positions.push(halfT, y, zShinogi);
-    uvs.push(u, 0.35);
-    // v2: Ha (sharp cutting edge)
+    colors.push(0.76 * hamonWave, 0.81 * hamonWave, 0.88 * hamonWave);
+    uvs.push(t, 0.38);
+
+    // v2: Ha (single razor cutting edge — gleaming white martensite Hamon)
     positions.push(0, y, zHa);
-    uvs.push(u, 1.0);
-    // v3: -X Shinogi ridge
+    colors.push(1.0, 1.0, 1.0);
+    uvs.push(t, 0.98);
+
+    // v3: -X Shinogi ridge (polished steel ridge)
     positions.push(-halfT, y, zShinogi);
-    uvs.push(u, 0.35);
+    colors.push(0.76 * hamonWave, 0.81 * hamonWave, 0.88 * hamonWave);
+    uvs.push(t, 0.38);
+
+    // v4: Mune closure (back spine UV wrap)
+    positions.push(0, y, zMune);
+    colors.push(0.42, 0.48, 0.56);
+    uvs.push(t, 0.0);
   }
 
+  const stride = 5;
   for (let i = 0; i < zSegments; i++) {
-    const base = i * 4;
-    const next = (i + 1) * 4;
+    const base = i * stride;
+    const next = (i + 1) * stride;
     for (let k = 0; k < 4; k++) {
-      const kNext = (k + 1) % 4;
-      indices.push(base + k, next + k, next + kNext);
-      indices.push(base + k, next + kNext, base + kNext);
+      indices.push(base + k, next + k, next + k + 1);
+      indices.push(base + k, next + k + 1, base + k + 1);
     }
   }
 
   const geo = new THREE.BufferGeometry();
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
   geo.setIndex(indices);
   geo.computeVertexNormals();
   return geo;
+}
+
+// ============================================================================
+// BOTANICAL MULTI-BLADE CURVED GRASS CLUMP & SEGMENTED NODAL BAMBOO (ZERO CONES!)
+// ============================================================================
+export function createMultiBladeGrassClumpGeometry(bladeCount = 9): THREE.BufferGeometry {
+  const positions: number[] = [];
+  const colors: number[] = [];
+  const uvs: number[] = [];
+  const indices: number[] = [];
+  const segsPerBlade = 5;
+  let vertOffset = 0;
+
+  for (let b = 0; b < bladeCount; b++) {
+    const angle = (b / bladeCount) * Math.PI * 2 + (b % 3) * 0.22;
+    const radiusOffset = (b % 2) * 0.08;
+    const bx = Math.cos(angle) * radiusOffset;
+    const bz = Math.sin(angle) * radiusOffset;
+    const bladeHeight = 0.82 + (b % 4) * 0.16;
+    const archDroop = 0.22 + (b % 3) * 0.09;
+    const baseHalfWidth = 0.038;
+
+    const dirX = Math.cos(angle + 0.15);
+    const dirZ = Math.sin(angle + 0.15);
+    const perpX = -dirZ;
+    const perpZ = dirX;
+
+    for (let s = 0; s <= segsPerBlade; s++) {
+      const t = s / segsPerBlade;
+      const y = bladeHeight * (t - 0.18 * t * t);
+      const reach = archDroop * (t * t);
+      const halfW = baseHalfWidth * (1.0 - 0.88 * Math.pow(t, 1.25));
+
+      const cx = bx + dirX * reach;
+      const cz = bz + dirZ * reach;
+
+      // Root-to-tip botanical subsurface color gradient
+      const rCol = THREE.MathUtils.lerp(0.14, 0.46, t);
+      const gCol = THREE.MathUtils.lerp(0.28, 0.68, t);
+      const bCol = THREE.MathUtils.lerp(0.11, 0.22, t);
+
+      positions.push(cx - perpX * halfW, y, cz - perpZ * halfW);
+      colors.push(rCol, gCol, bCol);
+      uvs.push(0, t);
+
+      positions.push(cx + perpX * halfW, y, cz + perpZ * halfW);
+      colors.push(rCol, gCol, bCol);
+      uvs.push(1, t);
+    }
+
+    for (let s = 0; s < segsPerBlade; s++) {
+      const i0 = vertOffset + s * 2;
+      const i1 = i0 + 1;
+      const i2 = i0 + 2;
+      const i3 = i0 + 3;
+      indices.push(i0, i2, i1);
+      indices.push(i1, i2, i3);
+    }
+    vertOffset += (segsPerBlade + 1) * 2;
+  }
+
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+  geo.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2));
+  geo.setIndex(indices);
+  geo.computeVertexNormals();
+  return geo;
+}
+
+export function createSegmentedBambooWithNodesGeometry(height = 8.4): THREE.BufferGeometry {
+  // Multi-node Mosochiku Bamboo culm with raised nodal rings and slight organic curve
+  return createSplineLatheGeometry(
+    [
+      [0.19, 0.0],
+      [0.16, 0.25],
+      [0.15, 1.35],
+      [0.175, 1.42], // Nodal joint ring 1
+      [0.145, 1.48],
+      [0.14, 2.75],
+      [0.168, 2.82], // Nodal joint ring 2
+      [0.138, 2.88],
+      [0.132, 4.25],
+      [0.158, 4.32], // Nodal joint ring 3
+      [0.128, 4.38],
+      [0.12, 5.85],
+      [0.145, 5.92], // Nodal joint ring 4
+      [0.115, 5.98],
+      [0.095, height * 0.92],
+      [0.04, height],
+    ],
+    24
+  );
 }
 
 export function createHarmonicHakamaGeometry(
@@ -768,6 +955,9 @@ export function createIrimoyaPagodaRoofGeometry(
 
 // ============================================================================
 // HIGH-DETAIL PARAMETRIC 3D WEAPON MESH BUILDER (All 20 Authentic Weapons)
+// Every single-edged Japanese blade uses ONE Unified Shinogi-Zukuri BufferGeometry
+// swept along a single parabolic Sori curve y(t) = S * t^2 (ZERO Split Edges!)
+// and defines explicit Two-Handed IK Grip Sockets (gripRightLocal & gripLeftLocal).
 // ============================================================================
 export function buildProceduralWeaponMesh(
   weapon: WeaponDef,
@@ -780,6 +970,11 @@ export function buildProceduralWeaponMesh(
   const brassMat = createUrushiLacquerMaterial(0xfbbf24, textures, false);
   const ironMat = createUrushiLacquerMaterial(0x1f242d, textures, false);
 
+  // Default Two-Handed Morote IK Grip Sockets along the Tsuka / Shaft
+  let isTwoHanded = true;
+  let gripRightLocal = { x: 0, y: 0.32, z: 0 };
+  let gripLeftLocal = { x: 0, y: 0.06, z: 0 };
+
   switch (weapon.id) {
     case 'uchigatana':
     case 'tachi':
@@ -788,38 +983,42 @@ export function buildProceduralWeaponMesh(
     case 'tanto': {
       const length =
         weapon.id === 'odachi'
-          ? 2.48
+          ? 2.28
           : weapon.id === 'tachi'
-            ? 1.85
+            ? 1.76
             : weapon.id === 'uchigatana'
-              ? 1.54
+              ? 1.48
               : weapon.id === 'wakizashi'
-                ? 1.06
-                : 0.72;
+                ? 1.02
+                : 0.68;
       const hiltLen =
         weapon.id === 'odachi'
-          ? 0.64
+          ? 0.62
           : weapon.id === 'tachi'
-            ? 0.56
+            ? 0.52
             : weapon.id === 'tanto'
               ? 0.24
-              : 0.38;
+              : 0.40;
       const sori =
         weapon.id === 'tachi'
-          ? 0.22
+          ? 0.20
           : weapon.id === 'odachi'
-            ? 0.28
+            ? 0.25
             : weapon.id === 'uchigatana'
               ? 0.14
-              : 0.08;
+              : 0.06;
+
+      isTwoHanded = weapon.id !== 'tanto';
+      gripRightLocal = { x: 0, y: hiltLen - 0.05, z: 0 };
+      gripLeftLocal = { x: 0, y: 0.05, z: 0 };
 
       // Turned Lathed Tsuka Hilt + Kashira Pommel + Fuchi Collar (48 radial segments)
       const tsukaGeo = createSplineLatheGeometry(
         [
           [0.01, 0],
-          [0.044, 0.02],
-          [0.036, hiltLen * 0.5],
-          [0.042, hiltLen],
+          [0.042, 0.02],
+          [0.035, hiltLen * 0.5],
+          [0.040, hiltLen],
           [0.01, hiltLen + 0.01],
         ],
         48
@@ -829,10 +1028,10 @@ export function buildProceduralWeaponMesh(
       // Silk Tsuka-ito Diamond Cord Cross-Wraps along Hilt
       const wrapCount = weapon.id === 'odachi' ? 7 : weapon.id === 'tanto' ? 3 : 5;
       for (let w = 0; w < wrapCount; w++) {
-        const wy = 0.06 + (w / Math.max(1, wrapCount - 1)) * (hiltLen - 0.11);
+        const wy = 0.05 + (w / Math.max(1, wrapCount - 1)) * (hiltLen - 0.10);
         addWithInkOutline(
           group,
-          new THREE.TorusGeometry(0.039, 0.0085, 10, 24),
+          new THREE.TorusGeometry(0.037, 0.0075, 10, 24),
           ironMat,
           [0, wy, 0],
           [Math.PI / 2 + (w % 2 === 0 ? 0.22 : -0.22), 0, 0]
@@ -840,84 +1039,76 @@ export function buildProceduralWeaponMesh(
       }
 
       // Extruded Beveled Mokko-Gata Tsuba Handguard (`bevelSegments: 8`)
-      const tsubaRadius = weapon.id === 'tanto' ? 0.058 : 0.115;
-      const tsubaGeo = createOrnateTsubaGeometry(tsubaRadius, 0.022, false);
+      const tsubaRadius = weapon.id === 'tanto' ? 0.058 : 0.108;
+      const tsubaGeo = createOrnateTsubaGeometry(tsubaRadius, 0.020, false);
       addWithInkOutline(group, tsubaGeo, brassMat, [0, hiltLen + 0.01, 0]);
 
       // Brass Habaki Blade Collar (Lathed)
       const habakiGeo = createSplineLatheGeometry(
         [
-          [0.038, 0],
-          [0.045, 0.035],
-          [0.041, 0.075],
+          [0.036, 0],
+          [0.042, 0.035],
+          [0.038, 0.07],
         ],
         32
       );
       addWithInkOutline(group, habakiGeo, brassMat, [0, hiltLen + 0.01, 0]);
 
-      // Parametric Extruded Curved Tamahagane Blade (`bevelSegments: 8`)
-      const bladeGeo = createExtrudedCurvedBladeGeometry(
+      // SINGLE UNIFIED 5-VERTEX SHINOGI-ZUKURI BLADE GEOMETRY (Zero secondary spine or detached Hamon!)
+      const unifiedBladeGeo = createShinogiZukuriBladeGeometry(
         length,
-        weapon.id === 'odachi' ? 0.095 : 0.082,
-        0.048,
+        weapon.id === 'odachi' ? 0.086 : 0.074,
         sori,
-        0.018
+        0.018,
+        48
       );
-      addWithInkOutline(group, bladeGeo, bladeMat, [-0.009, hiltLen + 0.07, 0]);
-
-      // Glowing Wavy Martensite Hamon Edge Ribbon along the cutting curve
-      const hamonGeo = createTubularPathGeometry(
-        [
-          [0, hiltLen + 0.08, 0.042],
-          [0, hiltLen + length * 0.35, 0.04 + sori * 0.22],
-          [0, hiltLen + length * 0.7, 0.034 + sori * 0.58],
-          [0, hiltLen + length + 0.05, 0.025 + sori * 1.04],
-        ],
-        0.008,
-        36,
-        12
-      );
-      addWithInkOutline(group, hamonGeo, hamonMat, [0, 0, 0], [0, 0, 0], [1, 1, 1], 1.02);
+      addWithInkOutline(group, unifiedBladeGeo, bladeMat, [0, hiltLen + 0.06, 0]);
       break;
     }
 
     case 'dual_ninjato': {
-      // Niten Ichi-Ryu Dual Wield (Curved Katana + Companion Straight Ninjato)
+      isTwoHanded = false;
+      gripRightLocal = { x: 0.17, y: 0.26, z: 0 };
+      gripLeftLocal = { x: -0.15, y: 0.26, z: 0 };
+      // Niten Ichi-Ryu Dual Wield (Curved Katana + Companion Wakizashi/Ninjato — Unified Shinogi-Zukuri)
       for (const [idx, side] of [-0.15, 0.17].entries()) {
         const isSecond = idx === 1;
-        const bLen = isSecond ? 1.15 : 1.42;
-        const sori = isSecond ? 0.02 : 0.12;
+        const bLen = isSecond ? 1.12 : 1.38;
+        const sori = isSecond ? 0.04 : 0.12;
         const tsukaGeo = createSplineLatheGeometry(
           [
             [0.01, 0],
-            [0.038, 0.02],
-            [0.034, 0.18],
-            [0.038, 0.35],
+            [0.036, 0.02],
+            [0.033, 0.18],
+            [0.036, 0.35],
           ],
           36
         );
         addWithInkOutline(group, tsukaGeo, hiltMat, [side, 0, 0]);
         addWithInkOutline(
           group,
-          createOrnateTsubaGeometry(0.095, 0.02, isSecond),
+          createOrnateTsubaGeometry(0.092, 0.018, isSecond),
           brassMat,
           [side, 0.35, 0]
         );
-        const bladeGeo = createExtrudedCurvedBladeGeometry(bLen, 0.076, 0.046, sori, 0.016);
-        addWithInkOutline(group, bladeGeo, bladeMat, [side - 0.008, 0.37, 0]);
+        const bladeGeo = createShinogiZukuriBladeGeometry(bLen, 0.068, sori, 0.016, 40);
+        addWithInkOutline(group, bladeGeo, bladeMat, [side, 0.36, 0]);
       }
       break;
     }
 
     case 'naginata': {
-      // Turned Oval Hardwood Shaft + Brass Ishizuki + Extruded Sweeping Glaive Blade
+      isTwoHanded = true;
+      gripRightLocal = { x: 0, y: 1.38, z: 0 };
+      gripLeftLocal = { x: 0, y: 0.56, z: 0 };
+      // Turned Oval Hardwood Shaft + Brass Ishizuki + Unified Shinogi-Zukuri Sweeping Glaive Blade
       const shaftGeo = createSplineLatheGeometry(
         [
           [0.01, 0],
-          [0.054, 0.08],
-          [0.038, 0.22],
-          [0.041, 1.2],
-          [0.046, 2.06],
+          [0.052, 0.08],
+          [0.036, 0.22],
+          [0.039, 1.2],
+          [0.044, 2.06],
         ],
         48
       );
@@ -925,7 +1116,7 @@ export function buildProceduralWeaponMesh(
       for (const ringY of [0.18, 0.72, 1.38, 1.98]) {
         addWithInkOutline(
           group,
-          new THREE.TorusGeometry(0.046, 0.009, 10, 28),
+          new THREE.TorusGeometry(0.044, 0.0085, 10, 28),
           brassMat,
           [0, ringY, 0],
           [Math.PI / 2, 0, 0]
@@ -933,17 +1124,20 @@ export function buildProceduralWeaponMesh(
       }
       addWithInkOutline(
         group,
-        createOrnateTsubaGeometry(0.088, 0.022, false),
+        createOrnateTsubaGeometry(0.086, 0.02, false),
         brassMat,
         [0, 2.06, 0]
       );
-      const glaiveGeo = createExtrudedCurvedBladeGeometry(1.08, 0.11, 0.068, 0.26, 0.02);
-      addWithInkOutline(group, glaiveGeo, bladeMat, [-0.01, 2.08, 0]);
+      const glaiveGeo = createShinogiZukuriBladeGeometry(1.06, 0.098, 0.22, 0.02, 44);
+      addWithInkOutline(group, glaiveGeo, bladeMat, [0, 2.07, 0]);
       break;
     }
 
     case 'yari': {
-      // Jumonji Yari (2.35m Turned Shaft + Extruded Central Spearhead + Crescent Cross-Blades)
+      isTwoHanded = true;
+      gripRightLocal = { x: 0, y: 1.48, z: 0 };
+      gripLeftLocal = { x: 0, y: 0.62, z: 0 };
+      // Jumonji Yari (2.35m Turned Shaft + Unified Spearhead + Crescent Cross-Blades)
       const shaftGeo = createSplineLatheGeometry(
         [
           [0.01, 0],
@@ -955,10 +1149,8 @@ export function buildProceduralWeaponMesh(
         48
       );
       addWithInkOutline(group, shaftGeo, hiltMat, [0, 0, 0]);
-      // Central Double-Edged Spearhead (Extruded Diamond Profile)
-      const centralBlade = createExtrudedCurvedBladeGeometry(0.76, 0.088, 0.02, 0.0, 0.022);
-      addWithInkOutline(group, centralBlade, hamonMat, [-0.011, 2.34, 0]);
-      // Curved Lateral Crescent Cross-Blades (Tubular Catmull-Rom Horn Arc)
+      const centralBlade = createShinogiZukuriBladeGeometry(0.74, 0.082, 0.0, 0.022, 32);
+      addWithInkOutline(group, centralBlade, bladeMat, [0, 2.34, 0]);
       const crescentGeo = createTubularPathGeometry(
         [
           [0, 2.66, -0.34],
@@ -967,7 +1159,7 @@ export function buildProceduralWeaponMesh(
           [0, 2.52, 0.18],
           [0, 2.66, 0.34],
         ],
-        0.026,
+        0.024,
         36,
         14
       );
@@ -976,6 +1168,9 @@ export function buildProceduralWeaponMesh(
     }
 
     case 'kanabo': {
+      isTwoHanded = true;
+      gripRightLocal = { x: 0, y: 0.52, z: 0 };
+      gripLeftLocal = { x: 0, y: 0.12, z: 0 };
       // Tapered Iron-Studded Kanabo / Tetsubo War Club (Lathed Core + 48 Hemispherical Studs)
       const clubGeo = createSplineLatheGeometry(
         [
@@ -991,7 +1186,6 @@ export function buildProceduralWeaponMesh(
       );
       addWithInkOutline(group, clubGeo, bladeMat, [0, 0, 0]);
 
-      // Stud Rings along the Barrel
       const studGeo = new THREE.SphereGeometry(0.034, 12, 12);
       for (let row = 0; row < 6; row++) {
         const y = 0.74 + row * 0.22;
@@ -1013,7 +1207,9 @@ export function buildProceduralWeaponMesh(
     }
 
     case 'kusarigama': {
-      // Turned Hardwood Handle + Extruded Perpendicular Curved Sickle + Catmull-Rom Chain + Lathed Fundo Weight
+      isTwoHanded = true;
+      gripRightLocal = { x: 0, y: 0.68, z: 0 };
+      gripLeftLocal = { x: 0, y: 0.16, z: 0 };
       const handleGeo = createSplineLatheGeometry(
         [
           [0.046, 0],
@@ -1024,16 +1220,15 @@ export function buildProceduralWeaponMesh(
       );
       addWithInkOutline(group, handleGeo, hiltMat, [0, 0, 0]);
 
-      const sickleGeo = createExtrudedCurvedBladeGeometry(0.58, 0.085, 0.024, 0.16, 0.018);
+      const sickleGeo = createShinogiZukuriBladeGeometry(0.56, 0.078, 0.14, 0.018, 32);
       addWithInkOutline(
         group,
         sickleGeo,
         bladeMat,
-        [-0.009, 0.88, 0.04],
+        [0, 0.88, 0.04],
         [Math.PI * 0.46, 0, 0]
       );
 
-      // Sweeping Verlet Chain Curve + Lathed Faceted Iron Fundo Weight
       const chainGeo = createTubularPathGeometry(
         [
           [0, 0.04, 0],
@@ -1061,7 +1256,9 @@ export function buildProceduralWeaponMesh(
     }
 
     case 'otsuchi': {
-      // Ono Bearded Crescent Great Battle Axe + Otsuchi Seismic Hammer Poll
+      isTwoHanded = true;
+      gripRightLocal = { x: 0, y: 1.24, z: 0 };
+      gripLeftLocal = { x: 0, y: 0.42, z: 0 };
       const shaftGeo = createSplineLatheGeometry(
         [
           [0.058, 0],
@@ -1073,7 +1270,6 @@ export function buildProceduralWeaponMesh(
       );
       addWithInkOutline(group, shaftGeo, hiltMat, [0, 0, 0]);
 
-      // Extruded Bearded Crescent Ono Axe Blade (`bevelSegments: 8`)
       const axeShape = new THREE.Shape();
       axeShape.moveTo(0, -0.18);
       axeShape.quadraticCurveTo(0.28, -0.24, 0.46, -0.44);
@@ -1092,7 +1288,6 @@ export function buildProceduralWeaponMesh(
       axeGeo.computeVertexNormals();
       addWithInkOutline(group, axeGeo, bladeMat, [-0.018, 1.72, 0.04]);
 
-      // Rear Seismic Otsuchi War Hammer Poll (Lathed Barrel)
       const pollGeo = createSplineLatheGeometry(
         [
           [0.01, 0],
@@ -1109,13 +1304,15 @@ export function buildProceduralWeaponMesh(
 
     case 'daikyu':
     case 'hankyu': {
-      // Authentic Asymmetrical Laminated Yumi Longbow / Hankyu Recurve via CatmullRom TubeGeometry
       const h = weapon.id === 'daikyu' ? 2.24 : 1.45;
+      isTwoHanded = true;
+      gripLeftLocal = { x: 0, y: h * 0.38, z: 0.28 }; // Left hand holds bow Nigiri grip
+      gripRightLocal = { x: 0, y: h * 0.38, z: -0.08 }; // Right hand draws Tsuru bowstring
       const bowCurveGeo = createTubularPathGeometry(
         [
           [0, -h * 0.32, -0.08],
           [0, -h * 0.14, 0.18],
-          [0, 0.06, 0.28], // Nigiri Grip (1/3 from bottom)
+          [0, 0.06, 0.28],
           [0, h * 0.34, 0.36],
           [0, h * 0.58, 0.14],
           [0, h * 0.68, -0.1],
@@ -1126,7 +1323,6 @@ export function buildProceduralWeaponMesh(
       );
       addWithInkOutline(group, bowCurveGeo, bladeMat, [0, h * 0.32, 0]);
 
-      // Rattan Grip Wrap
       const gripGeo = createSplineLatheGeometry(
         [
           [0.042, -0.12],
@@ -1137,7 +1333,6 @@ export function buildProceduralWeaponMesh(
       );
       addWithInkOutline(group, gripGeo, hiltMat, [0, h * 0.38, 0.28]);
 
-      // Taut Hemp Tsuru Bowstring
       const stringGeo = createTubularPathGeometry(
         [
           [0, 0.02, -0.08],
@@ -1150,7 +1345,6 @@ export function buildProceduralWeaponMesh(
       );
       addWithInkOutline(group, stringGeo, brassMat, [0, 0, 0]);
 
-      // Nocked Bamboo Ya Arrow with Extruded Karimata Forked Steel Arrowhead
       const arrowGeo = createTubularPathGeometry(
         [
           [0, h * 0.38, -0.1],
@@ -1161,19 +1355,21 @@ export function buildProceduralWeaponMesh(
         10
       );
       addWithInkOutline(group, arrowGeo, hiltMat, [0, 0, 0]);
-      const headGeo = createExtrudedCurvedBladeGeometry(0.18, 0.055, 0.012, 0, 0.012);
+      const headGeo = createShinogiZukuriBladeGeometry(0.18, 0.052, 0, 0.012, 16);
       addWithInkOutline(
         group,
         headGeo,
-        hamonMat,
-        [-0.006, h * 0.38, 0.76],
+        bladeMat,
+        [0, h * 0.38, 0.76],
         [Math.PI / 2, 0, 0]
       );
       break;
     }
 
     case 'tanegashima': {
-      // Matchlock Arquebus: Extruded Beveled Japanese Oak Stock + Lathed 1.28m Octagonal Barrel + Serpentine Lock
+      isTwoHanded = true;
+      gripRightLocal = { x: 0, y: 0.42, z: 0.04 };
+      gripLeftLocal = { x: 0, y: 1.05, z: 0.04 };
       const stockShape = new THREE.Shape();
       stockShape.moveTo(0, 0);
       stockShape.lineTo(0.16, 0.06);
@@ -1196,7 +1392,6 @@ export function buildProceduralWeaponMesh(
       stockGeo.computeVertexNormals();
       addWithInkOutline(group, stockGeo, hiltMat, [-0.037, 0.05, -0.04]);
 
-      // Lathed Heavy Barrel + Flared Muzzle Crown
       const barrelGeo = createSplineLatheGeometry(
         [
           [0.052, 0.45],
@@ -1209,7 +1404,6 @@ export function buildProceduralWeaponMesh(
       );
       addWithInkOutline(group, barrelGeo, bladeMat, [0, 0, 0.04]);
 
-      // Brass Barrel Retaining Bands (Domaki) & Serpentine Karakuri Lock
       for (const by of [0.65, 1.12, 1.58]) {
         addWithInkOutline(
           group,
@@ -1235,7 +1429,9 @@ export function buildProceduralWeaponMesh(
 
     case 'fukiya':
     case 'fukiya_stealth': {
-      // Turned Lacquered Bamboo Blowgun + Bo-Shuriken Quiver Ring
+      isTwoHanded = true;
+      gripRightLocal = { x: 0, y: 0.28, z: 0 };
+      gripLeftLocal = { x: 0, y: 0.72, z: 0 };
       const pipeGeo = createSplineLatheGeometry(
         [
           [0.062, 0],
@@ -1262,9 +1458,13 @@ export function buildProceduralWeaponMesh(
     case 'zanbato':
     case 'muramasa_cursed': {
       const isZanbato = weapon.id === 'zanbato';
-      const hiltLen = isZanbato ? 0.78 : 0.42;
+      const hiltLen = isZanbato ? 0.78 : 0.44;
       const bladeLen = isZanbato ? 2.25 : 1.72;
-      const sori = isZanbato ? 0.18 : 0.24;
+      const sori = isZanbato ? 0.18 : 0.22;
+      isTwoHanded = true;
+      gripRightLocal = { x: 0, y: hiltLen - 0.06, z: 0 };
+      gripLeftLocal = { x: 0, y: 0.06, z: 0 };
+
       const tsukaGeo = createSplineLatheGeometry(
         [
           [0.01, 0],
@@ -1275,29 +1475,22 @@ export function buildProceduralWeaponMesh(
         48
       );
       addWithInkOutline(group, tsukaGeo, hiltMat, [0, 0, 0]);
-      addWithInkOutline(group, createOrnateTsubaGeometry(0.14, 0.026, false), brassMat, [0, hiltLen, 0]);
+      addWithInkOutline(group, createOrnateTsubaGeometry(0.13, 0.024, false), brassMat, [0, hiltLen, 0]);
       const shinogiGeo = createShinogiZukuriBladeGeometry(
         bladeLen,
-        isZanbato ? 0.12 : 0.088,
+        isZanbato ? 0.115 : 0.084,
         sori,
-        isZanbato ? 0.026 : 0.018
+        isZanbato ? 0.024 : 0.018,
+        48
       );
-      addWithInkOutline(group, shinogiGeo, bladeMat, [0, hiltLen + 0.03, 0]);
-      const hamonGeo = createTubularPathGeometry(
-        [
-          [0, hiltLen + 0.05, 0.048],
-          [0, hiltLen + bladeLen * 0.5, 0.045 + sori * 0.3],
-          [0, hiltLen + bladeLen, 0.035 + sori],
-        ],
-        0.01,
-        36,
-        12
-      );
-      addWithInkOutline(group, hamonGeo, hamonMat, [0, 0, 0]);
+      addWithInkOutline(group, shinogiGeo, bladeMat, [0, hiltLen + 0.02, 0]);
       break;
     }
 
     case 'chigiriki': {
+      isTwoHanded = true;
+      gripRightLocal = { x: 0, y: 1.05, z: 0 };
+      gripLeftLocal = { x: 0, y: 0.35, z: 0 };
       const staffGeo = createSplineLatheGeometry(
         [
           [0.01, 0],
@@ -1333,6 +1526,9 @@ export function buildProceduralWeaponMesh(
     }
 
     case 'tekko_kagi': {
+      isTwoHanded = false;
+      gripRightLocal = { x: 0.14, y: 0.14, z: 0 };
+      gripLeftLocal = { x: -0.14, y: 0.14, z: 0 };
       for (const side of [-0.14, 0.14]) {
         const braceGeo = createSplineLatheGeometry(
           [
@@ -1351,6 +1547,9 @@ export function buildProceduralWeaponMesh(
     }
 
     case 'shakujo': {
+      isTwoHanded = true;
+      gripRightLocal = { x: 0, y: 1.26, z: 0 };
+      gripLeftLocal = { x: 0, y: 0.48, z: 0 };
       const shaftGeo = createSplineLatheGeometry(
         [
           [0.01, 0],
@@ -1376,6 +1575,9 @@ export function buildProceduralWeaponMesh(
     }
 
     case 'urumi_whip': {
+      isTwoHanded = true;
+      gripRightLocal = { x: 0, y: 0.30, z: 0 };
+      gripLeftLocal = { x: 0, y: 0.06, z: 0 };
       const tsukaGeo = createSplineLatheGeometry(
         [
           [0.01, 0],
@@ -1400,7 +1602,7 @@ export function buildProceduralWeaponMesh(
       addWithInkOutline(group, wireGeo, hamonMat, [0, 0, 0]);
       for (let s = 0; s < 12; s++) {
         const t = s / 11;
-        const segGeo = createExtrudedCurvedBladeGeometry(0.18, 0.072, 0.055, 0.01, 0.014);
+        const segGeo = createShinogiZukuriBladeGeometry(0.18, 0.068, 0.01, 0.014, 12);
         addWithInkOutline(
           group,
           segGeo,
@@ -1412,6 +1614,9 @@ export function buildProceduralWeaponMesh(
     }
 
     case 'twin_sai': {
+      isTwoHanded = false;
+      gripRightLocal = { x: 0.14, y: 0.12, z: 0 };
+      gripLeftLocal = { x: -0.14, y: 0.12, z: 0 };
       for (const side of [-0.14, 0.14]) {
         const shaftGeo = createSplineLatheGeometry(
           [
@@ -1440,6 +1645,9 @@ export function buildProceduralWeaponMesh(
 
     case 'bo_staff':
     case 'sasumata': {
+      isTwoHanded = true;
+      gripRightLocal = { x: 0, y: 1.32, z: 0 };
+      gripLeftLocal = { x: 0, y: 0.54, z: 0 };
       const staffGeo = createSplineLatheGeometry(
         [
           [0.01, 0],
@@ -1477,6 +1685,9 @@ export function buildProceduralWeaponMesh(
     }
 
     case 'tonfa': {
+      isTwoHanded = false;
+      gripRightLocal = { x: 0.15, y: 0.08, z: -0.12 };
+      gripLeftLocal = { x: -0.15, y: 0.08, z: -0.12 };
       for (const side of [-0.15, 0.15]) {
         const batonGeo = createSplineLatheGeometry(
           [
@@ -1502,6 +1713,9 @@ export function buildProceduralWeaponMesh(
     case 'hiya_zutsu':
     case 'bajozutsu': {
       const isCannon = weapon.id === 'hiya_zutsu';
+      isTwoHanded = isCannon;
+      gripRightLocal = { x: 0, y: 0.22, z: 0 };
+      gripLeftLocal = { x: 0, y: isCannon ? 0.72 : 0.12, z: 0 };
       const barrelGeo = createSplineLatheGeometry(
         isCannon
           ? [
@@ -1532,6 +1746,9 @@ export function buildProceduralWeaponMesh(
 
     case 'tessen':
     case 'onmyoji_scroll': {
+      isTwoHanded = false;
+      gripRightLocal = { x: 0, y: 0.14, z: 0 };
+      gripLeftLocal = { x: -0.12, y: 0.18, z: 0 };
       const fanShape = new THREE.Shape();
       fanShape.moveTo(0, 0);
       fanShape.absarc(0, 0, 0.52, Math.PI * 0.15, Math.PI * 0.85, false);
@@ -1556,11 +1773,18 @@ export function buildProceduralWeaponMesh(
     }
 
     default: {
-      const bladeGeo = createShinogiZukuriBladeGeometry(1.5, 0.08, 0.14, 0.018);
-      addWithInkOutline(group, bladeGeo, bladeMat, [0, 0.35, 0]);
+      isTwoHanded = true;
+      gripRightLocal = { x: 0, y: 0.34, z: 0 };
+      gripLeftLocal = { x: 0, y: 0.06, z: 0 };
+      const bladeGeo = createShinogiZukuriBladeGeometry(1.48, 0.074, 0.14, 0.018, 48);
+      addWithInkOutline(group, bladeGeo, bladeMat, [0, 0.38, 0]);
       break;
     }
   }
+
+  group.userData.isTwoHanded = isTwoHanded;
+  group.userData.gripRightLocal = gripRightLocal;
+  group.userData.gripLeftLocal = gripLeftLocal;
 
   return group;
 }
@@ -1583,6 +1807,8 @@ export interface SamuraiRig {
   helmetGroup: THREE.Group;
   rightArm: THREE.Group;
   leftArm: THREE.Group;
+  rightForearm: THREE.Group;
+  leftForearm: THREE.Group;
   weaponMount: THREE.Group;
   leftEyelid?: THREE.Mesh;
   rightEyelid?: THREE.Mesh;
@@ -1646,17 +1872,26 @@ export function createSamuraiHeroRig(
   headGroup.add(helmetGroup);
 
   const leftArm = new THREE.Group();
-  leftArm.position.set(-0.46, 0.78, 0);
+  leftArm.position.set(-0.36, 0.76, 0.06);
   torsoGroup.add(leftArm);
 
+  const leftForearm = new THREE.Group();
+  leftForearm.position.set(0, -0.28, 0);
+  leftArm.add(leftForearm);
+
   const rightArm = new THREE.Group();
-  rightArm.position.set(0.46, 0.78, 0);
+  rightArm.position.set(0.36, 0.76, 0.06);
   torsoGroup.add(rightArm);
 
+  const rightForearm = new THREE.Group();
+  rightForearm.position.set(0, -0.28, 0);
+  rightArm.add(rightForearm);
+
+  // Two-Handed Morote Weapon Mount poised in Chudan-no-kamae in front of torso
   const weaponMount = new THREE.Group();
-  weaponMount.position.set(0, -0.46, 0.14);
-  weaponMount.rotation.x = Math.PI * 0.38;
-  rightArm.add(weaponMount);
+  weaponMount.position.set(0.05, 0.36, 0.44);
+  weaponMount.rotation.set(Math.PI * 0.24, -0.12, -0.14);
+  torsoGroup.add(weaponMount);
 
   const rig: SamuraiRig = {
     root,
@@ -1672,6 +1907,8 @@ export function createSamuraiHeroRig(
     helmetGroup,
     rightArm,
     leftArm,
+    rightForearm,
+    leftForearm,
     weaponMount,
   };
 
@@ -1695,17 +1932,20 @@ export function updateSamuraiEquipmentVisuals(
     rig.helmetGroup,
     rig.leftLeg,
     rig.rightLeg,
+    rig.leftForearm,
+    rig.rightForearm,
   ]) {
     while (grp.children.length > 0) {
       grp.remove(grp.children[0]);
     }
   }
-  // Remove previous sleeve/skin children from arms while keeping weaponMount on rightArm
-  while (rig.leftArm.children.length > 0) {
-    rig.leftArm.remove(rig.leftArm.children[0]);
+  for (let i = rig.leftArm.children.length - 1; i >= 0; i--) {
+    if (rig.leftArm.children[i] !== rig.leftForearm) {
+      rig.leftArm.remove(rig.leftArm.children[i]);
+    }
   }
   for (let i = rig.rightArm.children.length - 1; i >= 0; i--) {
-    if (rig.rightArm.children[i] !== rig.weaponMount) {
+    if (rig.rightArm.children[i] !== rig.rightForearm && rig.rightArm.children[i] !== rig.weaponMount) {
       rig.rightArm.remove(rig.rightArm.children[i]);
     }
   }
@@ -1735,7 +1975,6 @@ export function updateSamuraiEquipmentVisuals(
     appearance.tattooOrPaint === 'kabuki_kumadori' || appearance.tattooOrPaint === 'oni_demon_jaw',
     textures
   );
-  const darkClothMat = createSumiWashiMaterial(0x1c1917, 0.72, 0.08, textures);
   const sandalMat = createSumiWashiMaterial(0x9a7b56, 0.74, 0.1, textures);
   const ironGreaveMat = createUrushiLacquerMaterial(0x27272a, textures, false);
 
@@ -1818,69 +2057,91 @@ export function updateSamuraiEquipmentVisuals(
   }
 
   // ==========================================================================
-  // C. SOLID ANATOMICAL ARMS, FOREARMS, WRISTS & ARTICULATED 5-FINGER HANDS
+  // C. ARTICULATED 2-BONE ARMS (UPPER ARM + FOREARM/KOTE GAUNTLET + 5-FINGER HAND)
+  // Built along -Y so Two-Bone Analytical IK (`applyMoroteDualHandWeaponIK`)
+  // locks BOTH left and right hands firmly onto the weapon's Tsuka handle!
   // ==========================================================================
-  const solidArmSkinGeo = createSplineLatheGeometry(
+  const upperArmSkinGeo = createSplineLatheGeometry(
     [
-      [0.052, -0.46], // Wrist
-      [0.074, -0.3], // Forearm Muscle
-      [0.068, -0.2], // Elbow
-      [0.092, -0.06], // Bicep / Tricep
-      [0.105, 0.05], // Deltoid Shoulder Cap
+      [0.068, -0.29], // Elbow joint
+      [0.094, -0.14], // Bicep / Tricep
+      [0.108, 0.04],  // Deltoid Shoulder Cap
     ],
-    36
+    32
+  );
+  const upperSleeveGeo = createSplineLatheGeometry(
+    [
+      [0.102, -0.26],
+      [0.125, -0.1],
+      [0.134, 0.03],
+    ],
+    32
+  );
+  const forearmSkinGeo = createSplineLatheGeometry(
+    [
+      [0.052, -0.25], // Wrist
+      [0.076, -0.12], // Forearm Muscle
+      [0.07, 0.02],   // Elbow Socket
+    ],
+    32
+  );
+  const koteGauntletGeo = createSplineLatheGeometry(
+    [
+      [0.068, -0.23], // Armored Wrist Cuff
+      [0.088, -0.11], // Kote Splint Plate
+      [0.084, 0.0],
+    ],
+    32
   );
   const palmGeo = createSplineLatheGeometry(
     [
-      [0.01, -0.54],
-      [0.056, -0.5],
-      [0.052, -0.45],
+      [0.012, -0.32],
+      [0.058, -0.28],
+      [0.054, -0.23],
     ],
     24
   );
-  const armSleeveGeo = createSplineLatheGeometry(
+
+  for (const [armIdx, pair] of (
     [
-      [0.082, -0.42],
-      [0.105, -0.26],
-      [0.125, -0.1],
-      [0.132, 0.02],
-    ],
-    36
-  );
-
-  for (const [armIdx, armGrp] of [rig.leftArm, rig.rightArm].entries()) {
+      [rig.leftArm, rig.leftForearm],
+      [rig.rightArm, rig.rightForearm],
+    ] as [THREE.Group, THREE.Group][]
+  ).entries()) {
+    const [upperGrp, forearmGrp] = pair;
     const isLeft = armIdx === 0;
-    // 1. Solid continuous anatomical arm skin (shoulder -> bicep -> forearm -> wrist -> palm)
-    addWithInkOutline(armGrp, solidArmSkinGeo, skinMat, [0, 0, 0]);
-    addWithInkOutline(armGrp, palmGeo, faceSkinMat, [0, 0, 0.02]);
+    // Upper arm skin & Kosode sleeve
+    addWithInkOutline(upperGrp, upperArmSkinGeo, skinMat, [0, 0, 0]);
+    const slipLeftSleeve = isLeft && armor.silhouetteType === 'haori';
+    if (!slipLeftSleeve) {
+      addWithInkOutline(upperGrp, upperSleeveGeo, primaryMat, [0, 0, 0]);
+    }
 
-    // 2. 5 Individual Articulated Fingers (Thumb, Index, Middle, Ring, Pinky) curled around Tsuka
+    // Forearm skin, armored Kote gauntlet, palm & 5 curled fingers gripping Tsuka
+    addWithInkOutline(forearmGrp, forearmSkinGeo, skinMat, [0, 0, 0]);
+    addWithInkOutline(forearmGrp, koteGauntletGeo, ironGreaveMat, [0, 0, 0]);
+    addWithInkOutline(forearmGrp, palmGeo, faceSkinMat, [0, 0, 0.015]);
+
     for (let f = 0; f < 5; f++) {
-      const fOffset = (f - 2) * 0.018;
+      const fOffset = (f - 2) * 0.017;
       const isThumb = f === 0;
       const fingerGeo = createTubularPathGeometry(
         isThumb
           ? [
-              [0.035, -0.47, 0.03],
-              [0.052, -0.49, 0.07],
-              [0.028, -0.5, 0.1],
+              [0.034, -0.25, 0.025],
+              [0.05, -0.27, 0.065],
+              [0.026, -0.28, 0.095],
             ]
           : [
-              [fOffset, -0.5, 0.04],
-              [fOffset, -0.53, 0.085],
-              [fOffset * 0.8, -0.51, 0.125],
+              [fOffset, -0.27, 0.035],
+              [fOffset, -0.3, 0.078],
+              [fOffset * 0.8, -0.28, 0.115],
             ],
         0.011,
         14,
         8
       );
-      addWithInkOutline(armGrp, fingerGeo, faceSkinMat, [0, 0, 0], [0, 0, 0], [1, 1, 1], 1.02);
-    }
-
-    // 3. Kosode Sleeve & Kote Forearm Guard (Ronin Wanderer slips left sleeve off to reveal tattooed muscular arm!)
-    const slipLeftSleeve = isLeft && armor.silhouetteType === 'haori';
-    if (!slipLeftSleeve) {
-      addWithInkOutline(armGrp, armSleeveGeo, primaryMat, [0, 0, 0]);
+      addWithInkOutline(forearmGrp, fingerGeo, faceSkinMat, [0, 0, 0], [0, 0, 0], [1, 1, 1], 1.02);
     }
   }
 
@@ -2685,27 +2946,433 @@ export function createEnemyMeshRig(
     }
   }
 
-  // Weapon Arm
+  // Two-Handed Enemy Weapon Arms (Right Lead Arm + Left Support Arm reaching across to Tsuka hilt)
   const weaponArm = new THREE.Group();
-  weaponArm.position.set(0.48, 1.42, 0);
+  weaponArm.position.set(0.28, 1.38, 0.22);
   const armGeo = createSplineLatheGeometry(
     [
-      [0.08, -0.44],
-      [0.11, -0.22],
-      [0.12, 0],
+      [0.075, -0.46],
+      [0.105, -0.22],
+      [0.115, 0],
     ],
     28
   );
-  addWithInkOutline(weaponArm, armGeo, primaryMat, [0, 0, 0]);
+  addWithInkOutline(weaponArm, armGeo, primaryMat, [0, 0, 0], [0.42, 0, -0.32]);
+
+  // Left support arm reaching across chest to grip lower Tsuka handle (Morote grip)
+  const leftSupportArmGeo = createTubularPathGeometry(
+    [
+      [-0.64, 0.02, -0.14],
+      [-0.38, -0.22, 0.12],
+      [-0.08, -0.34, 0.24],
+    ],
+    0.088,
+    20,
+    14
+  );
+  addWithInkOutline(weaponArm, leftSupportArmGeo, primaryMat, [0, 0, 0]);
 
   const wMesh = buildProceduralWeaponMesh(sampleWeapon, textures);
-  wMesh.position.set(0, -0.42, 0.1);
-  wMesh.rotation.x = Math.PI * 0.4;
+  wMesh.position.set(-0.08, -0.38, 0.26);
+  wMesh.rotation.set(Math.PI * 0.28, -0.15, -0.18);
   weaponArm.add(wMesh);
 
   bodyPivot.add(weaponArm);
 
   return { root, bodyPivot, weaponArm, telegraphRing };
+}
+
+// ============================================================================
+// TWO-HANDED MOROTE ANALYTICAL 2-BONE IK WEAPON SOLVER
+// Locks BOTH Right Hand (below Tsuba) and Left Hand (near Kashira / Shaft)
+// onto the weapon handle across Idle, Locomotion, Parry, and all 6 Combat Moves
+// in 3rd-Person RPG, 1st-Person FPV, and Isometric Camera Modes.
+// ============================================================================
+const _ikDownAxis = new THREE.Vector3(0, -1, 0);
+const _ikShoulderR = new THREE.Vector3();
+const _ikShoulderL = new THREE.Vector3();
+const _ikTargetR = new THREE.Vector3();
+const _ikTargetL = new THREE.Vector3();
+const _ikElbowR = new THREE.Vector3();
+const _ikElbowL = new THREE.Vector3();
+const _ikDirUpper = new THREE.Vector3();
+const _ikDirFore = new THREE.Vector3();
+const _ikQuatUpperInv = new THREE.Quaternion();
+const _ikWeaponQuat = new THREE.Quaternion();
+
+function solveTwoBoneIKVec3(
+  shoulder: THREE.Vector3,
+  target: THREE.Vector3,
+  poleOffset: THREE.Vector3,
+  lenUpper: number,
+  lenForearm: number,
+  outElbow: THREE.Vector3
+): void {
+  const dx = target.x - shoulder.x;
+  const dy = target.y - shoulder.y;
+  const dz = target.z - shoulder.z;
+  const rawDist = Math.hypot(dx, dy, dz);
+  const maxReach = (lenUpper + lenForearm) * 0.992;
+  const minReach = Math.abs(lenUpper - lenForearm) + 0.02;
+  const d = Math.max(minReach, Math.min(maxReach, rawDist));
+
+  const invRaw = rawDist > 1e-5 ? 1 / rawDist : 0;
+  const fx = dx * invRaw;
+  const fy = dy * invRaw;
+  const fz = dz * invRaw;
+
+  const cosAlpha = Math.max(
+    -1,
+    Math.min(1, (lenUpper * lenUpper + d * d - lenForearm * lenForearm) / (2 * lenUpper * d))
+  );
+  const sinAlpha = Math.sqrt(Math.max(0, 1 - cosAlpha * cosAlpha));
+
+  // Gram-Schmidt orthogonalization of poleOffset against forward axis f
+  const dotPF = poleOffset.x * fx + poleOffset.y * fy + poleOffset.z * fz;
+  let px = poleOffset.x - fx * dotPF;
+  let py = poleOffset.y - fy * dotPF;
+  let pz = poleOffset.z - fz * dotPF;
+  const pLen = Math.hypot(px, py, pz);
+  if (pLen > 1e-5) {
+    px /= pLen;
+    py /= pLen;
+    pz /= pLen;
+  } else {
+    px = 0;
+    py = -1;
+    pz = 0;
+  }
+
+  outElbow.set(
+    shoulder.x + (fx * cosAlpha + px * sinAlpha) * lenUpper,
+    shoulder.y + (fy * cosAlpha + py * sinAlpha) * lenUpper,
+    shoulder.z + (fz * cosAlpha + pz * sinAlpha) * lenUpper
+  );
+}
+
+function orientTwoBoneArmChain(
+  upperArm: THREE.Group,
+  forearm: THREE.Group,
+  shoulder: THREE.Vector3,
+  elbow: THREE.Vector3,
+  handTarget: THREE.Vector3
+): void {
+  _ikDirUpper.subVectors(elbow, shoulder);
+  if (_ikDirUpper.lengthSq() > 1e-6) {
+    _ikDirUpper.normalize();
+  } else {
+    _ikDirUpper.set(0, -1, 0);
+  }
+  upperArm.quaternion.setFromUnitVectors(_ikDownAxis, _ikDirUpper);
+
+  // Transform forearm direction into upperArm's local coordinate frame
+  _ikDirFore.subVectors(handTarget, elbow);
+  if (_ikDirFore.lengthSq() > 1e-6) {
+    _ikDirFore.normalize();
+  } else {
+    _ikDirFore.set(0, -1, 0);
+  }
+  _ikQuatUpperInv.copy(upperArm.quaternion).invert();
+  _ikDirFore.applyQuaternion(_ikQuatUpperInv).normalize();
+  forearm.quaternion.setFromUnitVectors(_ikDownAxis, _ikDirFore);
+}
+
+export function applyMoroteDualHandWeaponIK(
+  rig: SamuraiRig,
+  params: {
+    isParrying: boolean;
+    isAttacking: boolean;
+    activeMoveId?: number;
+    swingProgress: number;
+    gaitSwing: number;
+    breathTime: number;
+    cameraMode: 'third_person_rpg' | 'first_person_fpv' | 'isometric_tactical';
+  }
+): { rightHandTorsoPos: { x: number; y: number; z: number }; leftHandTorsoPos: { x: number; y: number; z: number } } {
+  const isFPV = params.cameraMode === 'first_person_fpv';
+  rig.headGroup.visible = !isFPV;
+  rig.skinBodyGroup.visible = !isFPV;
+  rig.armorGroup.visible = !isFPV;
+  rig.leftLeg.visible = !isFPV;
+  rig.rightLeg.visible = !isFPV;
+
+  const weaponGroup = rig.weaponMount.children[0] as THREE.Group | undefined;
+  const gripRightLocal: { x: number; y: number; z: number } = weaponGroup?.userData?.gripRightLocal || {
+    x: 0,
+    y: 0.34,
+    z: 0,
+  };
+  const gripLeftLocal: { x: number; y: number; z: number } = weaponGroup?.userData?.gripLeftLocal || {
+    x: 0,
+    y: 0.06,
+    z: 0,
+  };
+
+  // 1. Compute target pose of `weaponMount` in `torsoGroup` space
+  const breathBob = Math.sin(params.breathTime * 2.6) * 0.014;
+  const walkSwayX = params.gaitSwing * 0.035;
+  const walkSwayY = Math.abs(params.gaitSwing) * 0.022;
+
+  // Default Chudan-no-kamae (Middle Two-Handed Samurai Guard in front-right of torso, blade angled 45° up-forward)
+  let wx = (isFPV ? -0.16 : -0.24) + walkSwayX;
+  let wy = (isFPV ? 0.38 : 0.36) + breathBob - walkSwayY;
+  let wz = isFPV ? 0.68 : 0.42;
+
+  let rx = isFPV ? 0.46 : 0.48;
+  let ry = (isFPV ? 0.18 : 0.16) + params.gaitSwing * 0.05;
+  let rz = isFPV ? 0.14 : 0.18;
+
+  if (params.isParrying) {
+    // Two-Handed Diagonal Kasumi / Takigawa Parry Barrier across chest & face
+    wx = 0.04;
+    wy = isFPV ? 0.54 : 0.56;
+    wz = isFPV ? 0.66 : 0.48;
+    rx = 0.28;
+    ry = 0.46;
+    rz = -0.82;
+  } else if (params.isAttacking) {
+    const p = Math.max(0, Math.min(1, params.swingProgress));
+    // Smooth S-curve whip acceleration through the slash apex
+    const s = p * p * (3 - 2 * p);
+    const moveId = params.activeMoveId || 1;
+
+    switch (moveId) {
+      case 1: // Kesagiri: High-Right Jodan to Low-Left Diagonal Cleave
+        wx = THREE.MathUtils.lerp(0.22, -0.26, s);
+        wy = THREE.MathUtils.lerp(isFPV ? 0.78 : 0.68, isFPV ? 0.36 : 0.18, s);
+        wz = THREE.MathUtils.lerp(0.34, 0.56, Math.sin(p * Math.PI));
+        rx = THREE.MathUtils.lerp(-0.38, 1.48, s);
+        ry = THREE.MathUtils.lerp(-0.65, 0.72, s);
+        rz = THREE.MathUtils.lerp(-0.55, 0.62, s);
+        break;
+      case 2: // Kiriage: Low-Left Wakigamae to High-Right Rising Diagonal Slash
+        wx = THREE.MathUtils.lerp(-0.24, 0.24, s);
+        wy = THREE.MathUtils.lerp(isFPV ? 0.34 : 0.16, isFPV ? 0.8 : 0.72, s);
+        wz = THREE.MathUtils.lerp(0.36, 0.58, Math.sin(p * Math.PI));
+        rx = THREE.MathUtils.lerp(1.42, -0.32, s);
+        ry = THREE.MathUtils.lerp(0.68, -0.68, s);
+        rz = THREE.MathUtils.lerp(0.58, -0.58, s);
+        break;
+      case 3: // Ichimonji: Wide Two-Handed Horizontal Cleave
+        wx = THREE.MathUtils.lerp(0.28, -0.28, s);
+        wy = (isFPV ? 0.58 : 0.42) + Math.sin(p * Math.PI) * 0.06;
+        wz = 0.48 + Math.sin(p * Math.PI) * 0.12;
+        rx = 1.18;
+        ry = THREE.MathUtils.lerp(-0.95, 0.95, s);
+        rz = -1.28;
+        break;
+      case 4: // Tsuki: Deep Two-Handed Lunging Heart-Piercer Thrust
+        wx = 0.02;
+        wy = isFPV ? 0.56 : 0.38;
+        wz = THREE.MathUtils.lerp(0.26, 0.68, Math.sin(p * Math.PI));
+        rx = 1.38;
+        ry = 0.0;
+        rz = -0.08;
+        break;
+      case 5: // Tsumujikaze: 360° Two-Handed Whirlwind Slash
+        wx = Math.cos(p * Math.PI * 2) * 0.24;
+        wy = isFPV ? 0.56 : 0.4;
+        wz = 0.48;
+        rx = 1.15;
+        ry = (p - 0.5) * 1.6;
+        rz = -1.15;
+        break;
+      case 6: // Kabutowari: High Overhead Dai-Jodan Helm-Splitter Slam
+      default:
+        wx = 0.0;
+        wy = THREE.MathUtils.lerp(isFPV ? 0.86 : 0.82, isFPV ? 0.32 : 0.12, s);
+        wz = THREE.MathUtils.lerp(0.26, 0.58, Math.sin(p * Math.PI));
+        rx = THREE.MathUtils.lerp(-0.55, 1.62, s);
+        ry = 0.0;
+        rz = 0.0;
+        break;
+    }
+  }
+
+  rig.weaponMount.position.set(wx, wy, wz);
+  rig.weaponMount.rotation.set(rx, ry, rz);
+  _ikWeaponQuat.setFromEuler(rig.weaponMount.rotation);
+
+  // 2. Transform weapon's local grip sockets into `torsoGroup` space
+  _ikTargetR
+    .set(gripRightLocal.x, gripRightLocal.y, gripRightLocal.z)
+    .applyQuaternion(_ikWeaponQuat)
+    .add(rig.weaponMount.position);
+  _ikTargetL
+    .set(gripLeftLocal.x, gripLeftLocal.y, gripLeftLocal.z)
+    .applyQuaternion(_ikWeaponQuat)
+    .add(rig.weaponMount.position);
+
+  // Offset from forearm wrist (-0.28) so the 5 curled fingers wrap directly around the Tsuka
+  const upperLen = 0.28;
+  const forearmGripLen = 0.27;
+
+  // Shoulder positions (lifted slightly forward in FPV so both gauntlets frame the viewport)
+  rig.rightArm.position.set(isFPV ? 0.32 : 0.36, isFPV ? 0.82 : 0.76, isFPV ? 0.16 : 0.06);
+  rig.leftArm.position.set(isFPV ? -0.32 : -0.36, isFPV ? 0.82 : 0.76, isFPV ? 0.16 : 0.06);
+
+  _ikShoulderR.copy(rig.rightArm.position);
+  _ikShoulderL.copy(rig.leftArm.position);
+
+  // Solve 2-Bone Analytical IK for Right Arm -> gripRight and Left Arm -> gripLeft
+  solveTwoBoneIKVec3(
+    _ikShoulderR,
+    _ikTargetR,
+    new THREE.Vector3(0.45, -0.38, -0.18),
+    upperLen,
+    forearmGripLen,
+    _ikElbowR
+  );
+  orientTwoBoneArmChain(rig.rightArm, rig.rightForearm, _ikShoulderR, _ikElbowR, _ikTargetR);
+
+  solveTwoBoneIKVec3(
+    _ikShoulderL,
+    _ikTargetL,
+    new THREE.Vector3(-0.45, -0.38, -0.18),
+    upperLen,
+    forearmGripLen,
+    _ikElbowL
+  );
+  orientTwoBoneArmChain(rig.leftArm, rig.leftForearm, _ikShoulderL, _ikElbowL, _ikTargetL);
+
+  return {
+    rightHandTorsoPos: { x: _ikTargetR.x, y: _ikTargetR.y, z: _ikTargetR.z },
+    leftHandTorsoPos: { x: _ikTargetL.x, y: _ikTargetL.y, z: _ikTargetL.z },
+  };
+}
+
+// ============================================================================
+// BOTANICAL BAMBOO CANOPY & GNARLED JAPANESE TREE BUILDERS (ZERO CONES/CYLINDERS)
+// ============================================================================
+export function buildBambooClusterWithCanopy(
+  textures: ProceduralTextures,
+  stalkCount = 3,
+  baseHeight = 8.4
+): THREE.Group {
+  const group = new THREE.Group();
+  const stalkMat = createSumiWashiMaterial(0x2d5a27, 0.56, 0.08, textures);
+  const leafMat = createSumiWashiMaterial(0x3f7a38, 0.62, 0.05, textures);
+
+  const stalkGeo = createSegmentedBambooWithNodesGeometry(baseHeight);
+  const leafClusterGeo = createMultiBladeGrassClumpGeometry(7);
+
+  for (let i = 0; i < stalkCount; i++) {
+    const angle = (i / stalkCount) * Math.PI * 2 + 0.35;
+    const dist = i === 0 ? 0 : 0.28 + i * 0.08;
+    const hScale = 0.85 + (i % 3) * 0.12;
+    const stalk = new THREE.Mesh(stalkGeo, stalkMat);
+    stalk.position.set(Math.cos(angle) * dist, 0, Math.sin(angle) * dist);
+    stalk.scale.set(1, hScale, 1);
+    stalk.rotation.set((i - 1) * 0.035, angle, (1 - i) * 0.03);
+    stalk.castShadow = true;
+    stalk.receiveShadow = true;
+    group.add(stalk);
+
+    // Lush Bamboo Leaf Sprays at upper nodes
+    for (const nodeFrac of [0.68, 0.84, 0.98]) {
+      const spray = new THREE.Mesh(leafClusterGeo, leafMat);
+      spray.position.set(
+        stalk.position.x + Math.cos(angle + nodeFrac * 4) * 0.22,
+        baseHeight * hScale * nodeFrac,
+        stalk.position.z + Math.sin(angle + nodeFrac * 4) * 0.22
+      );
+      spray.scale.set(1.35, 0.95, 1.35);
+      spray.rotation.set(0.45, angle + nodeFrac * 3.1, 0.25);
+      group.add(spray);
+    }
+  }
+  return group;
+}
+
+export function buildGnarledJapaneseTree(
+  style: 'matsu_pine' | 'momiji_maple' | 'sakura_cherry',
+  textures: ProceduralTextures
+): THREE.Group {
+  const group = new THREE.Group();
+  const barkMat = createSumiWashiMaterial(0x3e2c23, 0.86, 0.05, textures);
+  const foliageColor =
+    style === 'momiji_maple' ? 0xb91c1c : style === 'sakura_cherry' ? 0xf472b6 : 0x1e3f20;
+  const foliageAccent =
+    style === 'momiji_maple' ? 0xd97706 : style === 'sakura_cherry' ? 0xfbcfe8 : 0x2d5a27;
+
+  const foliageMatA = createSumiWashiMaterial(foliageColor, 0.72, 0.06, textures);
+  const foliageMatB = createSumiWashiMaterial(foliageAccent, 0.72, 0.06, textures);
+
+  // Gnarled Windswept Trunk swept along a 3D Catmull-Rom curve
+  const trunkGeo = createTubularPathGeometry(
+    [
+      [0, -0.2, 0],
+      [0.24, 1.45, 0.12],
+      [-0.18, 3.1, -0.14],
+      [0.32, 4.65, 0.18],
+      [0.12, 5.8, 0.05],
+    ],
+    0.28,
+    28,
+    14
+  );
+  const trunkMesh = new THREE.Mesh(trunkGeo, barkMat);
+  trunkMesh.castShadow = true;
+  trunkMesh.receiveShadow = true;
+  group.add(trunkMesh);
+
+  // 3 Sculpted Boughs + Layered Cloud-Pruned (Niwaki) Canopy Pads
+  const canopyPadGeo = createSplineLatheGeometry(
+    [
+      [0.08, -0.28],
+      [1.45, -0.12],
+      [1.75, 0.18],
+      [0.95, 0.52],
+      [0.05, 0.68],
+    ],
+    24
+  );
+
+  const branches: { pts: [number, number, number][]; padPos: [number, number, number]; padScale: [number, number, number] }[] = [
+    {
+      pts: [
+        [0.05, 2.8, -0.05],
+        [1.15, 3.65, 0.45],
+        [2.05, 4.1, 0.75],
+      ],
+      padPos: [2.05, 4.15, 0.75],
+      padScale: [1.1, 0.85, 1.1],
+    },
+    {
+      pts: [
+        [-0.08, 3.4, -0.08],
+        [-1.25, 4.2, -0.52],
+        [-2.15, 4.65, -0.82],
+      ],
+      padPos: [-2.15, 4.7, -0.82],
+      padScale: [1.15, 0.9, 1.15],
+    },
+    {
+      pts: [
+        [0.22, 4.5, 0.12],
+        [0.45, 5.5, -0.65],
+        [0.15, 6.1, -0.25],
+      ],
+      padPos: [0.15, 6.05, -0.15],
+      padScale: [1.45, 1.05, 1.45],
+    },
+  ];
+
+  branches.forEach((b, idx) => {
+    const bGeo = createTubularPathGeometry(b.pts, 0.14, 18, 10);
+    const bMesh = new THREE.Mesh(bGeo, barkMat);
+    bMesh.castShadow = true;
+    group.add(bMesh);
+
+    const padMesh = new THREE.Mesh(canopyPadGeo, idx % 2 === 0 ? foliageMatA : foliageMatB);
+    padMesh.position.set(b.padPos[0], b.padPos[1], b.padPos[2]);
+    padMesh.scale.set(b.padScale[0], b.padScale[1], b.padScale[2]);
+    padMesh.castShadow = true;
+    padMesh.receiveShadow = true;
+    group.add(padMesh);
+  });
+
+  return group;
 }
 
 // ============================================================================
@@ -2721,7 +3388,6 @@ export function createProjectileMesh(
   const accentMat = createUrushiLacquerMaterial(0xfbbf24, textures, false);
 
   if (type === 'bleed_fan') {
-    // Extruded Beveled 8-Point Hira-Shuriken Star Blade (`bevelSegments: 8`)
     const starShape = new THREE.Shape();
     const pts = 16;
     for (let i = 0; i <= pts; i++) {
@@ -2751,7 +3417,6 @@ export function createProjectileMesh(
       [Math.PI / 2, 0, 0]
     );
   } else if (type === 'fire_aoe') {
-    // Lathed Horokudama Ceramic Black-Powder Sphere + Cord + Burning Fuse
     const bombGeo = createSplineLatheGeometry(
       [
         [0.01, -0.24],
@@ -2775,7 +3440,6 @@ export function createProjectileMesh(
     );
     addWithInkOutline(group, fuseGeo, accentMat, [0, 0, 0]);
   } else if (type === 'caltrop_slow') {
-    // 4-Spiked Forged Iron Makibishi Caltrop
     for (const rot of [
       [0, 0, 0],
       [Math.PI * 0.68, 0, 0],
@@ -2793,7 +3457,6 @@ export function createProjectileMesh(
       addWithInkOutline(group, spikeGeo, mat, [0, 0, 0], rot);
     }
   } else if (type === 'bullet') {
-    // High-Velocity Tanegashima Lead Ball (Lathed 32 segments)
     const ballGeo = createSplineLatheGeometry(
       [
         [0.005, -0.13],
@@ -2804,7 +3467,6 @@ export function createProjectileMesh(
     );
     addWithInkOutline(group, ballGeo, mat, [0, 0, 0]);
   } else if (type === 'stagger_pierce') {
-    // Extruded Forged Leaf-Blade Kunai + Ring Pommel
     const kunaiBlade = createExtrudedCurvedBladeGeometry(0.46, 0.095, 0.015, 0, 0.016);
     addWithInkOutline(group, kunaiBlade, mat, [-0.008, 0, -0.12], [Math.PI / 2, 0, 0]);
     addWithInkOutline(
@@ -2815,7 +3477,6 @@ export function createProjectileMesh(
       [Math.PI / 2, 0, 0]
     );
   } else {
-    // Bamboo Ya Arrow / Bo-Shuriken Needle with Extruded Steel Yanone Head
     const shaftGeo = createTubularPathGeometry(
       [
         [0, 0, -0.36],
@@ -2881,7 +3542,6 @@ export function createDojoDummyMeshRig(
   const crimsonMat = createUrushiLacquerMaterial(0x991b1b, textures, false);
   const brassMat = createUrushiLacquerMaterial(0xfbbf24, textures, false);
 
-  // Turned & Beveled Cross-Timber Dojo Base Plinth (Centered at origin)
   const plinthDiscGeo = createSplineLatheGeometry(
     [
       [0.72, 0],
@@ -2892,7 +3552,6 @@ export function createDojoDummyMeshRig(
   );
   addWithInkOutline(bodyPivot, plinthDiscGeo, woodMat, [0, 0, 0]);
 
-  // Turned Hardwood Central Post & Woven Straw Makiwara Torso (Lathed 48 segments)
   const postAndMakiwaraGeo = createSplineLatheGeometry(
     [
       [0.22, 0.08],
@@ -2908,7 +3567,6 @@ export function createDojoDummyMeshRig(
   );
   addWithInkOutline(bodyPivot, postAndMakiwaraGeo, strawMat, [0, 0, 0]);
 
-  // Crimson Urushi Bullseye Strike Rings
   for (const ry of [0.85, 1.2, 1.55]) {
     addWithInkOutline(
       bodyPivot,
@@ -2919,7 +3577,6 @@ export function createDojoDummyMeshRig(
     );
   }
 
-  // Practice Kasa Hat (Lathed 48 segments) & Gold Bullseye Crest
   const dummyKasaGeo = createSplineLatheGeometry(
     [
       [0.58, 2.02],
@@ -2936,9 +3593,9 @@ export function createDojoDummyMeshRig(
     [0, 2.22, 0.18]
   );
 
-  // Mechanical Swinging Right Practice Arm
+  // Two-Handed Mechanical Practice Arms gripping the training blade
   const weaponArm = new THREE.Group();
-  weaponArm.position.set(0.5, 1.46, 0);
+  weaponArm.position.set(0.28, 1.44, 0.22);
   const armGeo = createSplineLatheGeometry(
     [
       [0.08, -0.44],
@@ -2947,11 +3604,22 @@ export function createDojoDummyMeshRig(
     ],
     28
   );
-  addWithInkOutline(weaponArm, armGeo, woodMat, [0, 0, 0]);
+  addWithInkOutline(weaponArm, armGeo, woodMat, [0, 0, 0], [0.42, 0, -0.32]);
+  const leftSupportGeo = createTubularPathGeometry(
+    [
+      [-0.62, 0.02, -0.12],
+      [-0.36, -0.22, 0.12],
+      [-0.08, -0.34, 0.24],
+    ],
+    0.088,
+    18,
+    12
+  );
+  addWithInkOutline(weaponArm, leftSupportGeo, woodMat, [0, 0, 0]);
 
   const wMesh = buildProceduralWeaponMesh(sampleWeapon, textures);
-  wMesh.position.set(0, -0.44, 0.1);
-  wMesh.rotation.x = Math.PI * 0.4;
+  wMesh.position.set(-0.08, -0.38, 0.26);
+  wMesh.rotation.set(Math.PI * 0.28, -0.15, -0.18);
   weaponArm.add(wMesh);
   bodyPivot.add(weaponArm);
 
