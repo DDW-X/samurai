@@ -3090,7 +3090,14 @@ export function applyMoroteDualHandWeaponIK(
   }
 ): { rightHandTorsoPos: { x: number; y: number; z: number }; leftHandTorsoPos: { x: number; y: number; z: number } } {
   const isFPV = params.cameraMode === 'first_person_fpv';
+  // Strictly hide head, helmet, hair, cape, torso, and legs in 1st-person mode so they NEVER clip into camera
   rig.headGroup.visible = !isFPV;
+  rig.helmetGroup.visible = !isFPV;
+  rig.hairGroup.visible = !isFPV;
+  if (rig.capeMesh) {
+    rig.capeMesh.visible = !isFPV;
+  }
+  rig.torsoGroup.visible = !isFPV;
   rig.skinBodyGroup.visible = !isFPV;
   rig.armorGroup.visible = !isFPV;
   rig.leftLeg.visible = !isFPV;
@@ -3240,6 +3247,247 @@ export function applyMoroteDualHandWeaponIK(
     leftHandTorsoPos: { x: _ikTargetL.x, y: _ikTargetL.y, z: _ikTargetL.z },
   };
 }
+
+// ============================================================================
+// DEDICATED FIRST-PERSON VIEWMODEL RIG (`fpvRig`) ATTACHED DIRECTLY TO CAMERA
+// Features two high-detail armored Samurai forearms & hands (`Kote` gauntlets +
+// 5 articulated fingers) gripping the active unified Shinogi-Zukuri weapon at
+// `(0.28, -0.32, -0.65)` in camera space — ZERO body/helmet clipping!
+// ============================================================================
+export interface FirstPersonViewmodelRig {
+  root: THREE.Group;
+  gripPivot: THREE.Group;
+  rightArmGroup: THREE.Group;
+  leftArmGroup: THREE.Group;
+  weaponMount: THREE.Group;
+}
+
+export function createFirstPersonViewmodelRig(
+  weapon: WeaponDef,
+  armor: ArmorDef,
+  textures: ProceduralTextures,
+  appearance: CharacterAppearanceConfig = DEFAULT_CHARACTER_APPEARANCE
+): FirstPersonViewmodelRig {
+  const root = new THREE.Group();
+  root.name = 'Samurai_FPV_Viewmodel_Rig';
+  // Base lower-right/center camera-space viewmodel position: (0.28, -0.32, -0.65)
+  root.position.set(0.28, -0.32, -0.65);
+  root.visible = false;
+
+  const gripPivot = new THREE.Group();
+  gripPivot.scale.setScalar(0.54);
+  root.add(gripPivot);
+
+  const rightArmGroup = new THREE.Group();
+  const leftArmGroup = new THREE.Group();
+  const weaponMount = new THREE.Group();
+  gripPivot.add(rightArmGroup, leftArmGroup, weaponMount);
+
+  const fpvRig: FirstPersonViewmodelRig = {
+    root,
+    gripPivot,
+    rightArmGroup,
+    leftArmGroup,
+    weaponMount,
+  };
+
+  rebuildFirstPersonViewmodelWeapon(fpvRig, weapon, armor, textures, appearance);
+  return fpvRig;
+}
+
+export function rebuildFirstPersonViewmodelWeapon(
+  fpvRig: FirstPersonViewmodelRig,
+  weapon: WeaponDef,
+  armor: ArmorDef,
+  textures: ProceduralTextures,
+  appearance: CharacterAppearanceConfig = DEFAULT_CHARACTER_APPEARANCE
+): void {
+  for (const grp of [fpvRig.rightArmGroup, fpvRig.leftArmGroup, fpvRig.weaponMount]) {
+    while (grp.children.length > 0) {
+      grp.remove(grp.children[0]);
+    }
+  }
+
+  const skinDef =
+    SKIN_COMPLEXIONS.find((s) => s.id === appearance.skinComplexion) || SKIN_COMPLEXIONS[1];
+  const skinMat = createAnatomicalSSSMaterial(
+    skinDef.colorHex,
+    skinDef.sssDermisHex,
+    appearance.weatheringSheen,
+    false,
+    textures
+  );
+  const koteMat = createUrushiLacquerMaterial(armor.primaryColor, textures, false);
+  const trimMat = createUrushiLacquerMaterial(armor.accentColor, textures, false);
+
+  const forearmGeo = createSplineLatheGeometry(
+    [
+      [0.05, 0.0],
+      [0.078, 0.16],
+      [0.088, 0.36],
+      [0.072, 0.44],
+    ],
+    28
+  );
+  const kotePlateGeo = createSplineLatheGeometry(
+    [
+      [0.066, 0.02],
+      [0.092, 0.18],
+      [0.096, 0.34],
+    ],
+    28
+  );
+  const palmGeo = createSplineLatheGeometry(
+    [
+      [0.015, -0.06],
+      [0.056, -0.02],
+      [0.052, 0.03],
+    ],
+    20
+  );
+
+  // Build Right Lead Kote Forearm & 5-Finger Hand gripping upper Tsuka (below Tsuba)
+  const buildForearmAssembly = (targetGrp: THREE.Group, isLeft: boolean) => {
+    addWithInkOutline(targetGrp, forearmGeo, skinMat, [0, 0, 0], [Math.PI * 0.44, 0, isLeft ? -0.32 : 0.24]);
+    addWithInkOutline(targetGrp, kotePlateGeo, koteMat, [0, 0, 0], [Math.PI * 0.44, 0, isLeft ? -0.32 : 0.24]);
+    addWithInkOutline(
+      targetGrp,
+      new THREE.TorusGeometry(0.068, 0.011, 10, 24),
+      trimMat,
+      [0, 0.02, 0.02],
+      [Math.PI / 2, 0, 0]
+    );
+    addWithInkOutline(targetGrp, palmGeo, skinMat, [0, 0, 0]);
+    for (let f = 0; f < 5; f++) {
+      const fOff = (f - 2) * 0.016;
+      const fingerGeo = createTubularPathGeometry(
+        [
+          [fOff, 0.01, -0.02],
+          [fOff, 0.02, -0.062],
+          [fOff * 0.75, -0.01, -0.082],
+        ],
+        0.011,
+        12,
+        8
+      );
+      addWithInkOutline(targetGrp, fingerGeo, skinMat, [0, 0, 0], [0, 0, 0], [1, 1, 1], 1.02);
+    }
+  };
+
+  buildForearmAssembly(fpvRig.rightArmGroup, false);
+  buildForearmAssembly(fpvRig.leftArmGroup, true);
+
+  // Mount Equipped Unified Shinogi-Zukuri Weapon
+  const weaponMesh = buildProceduralWeaponMesh(weapon, textures);
+  fpvRig.weaponMount.add(weaponMesh);
+
+  const gripR = weaponMesh.userData?.gripRightLocal || { x: 0, y: 0.32, z: 0 };
+  const gripL = weaponMesh.userData?.gripLeftLocal || { x: 0, y: 0.06, z: 0 };
+
+  fpvRig.rightArmGroup.position.set(gripR.x + 0.02, gripR.y, gripR.z + 0.03);
+  fpvRig.leftArmGroup.position.set(gripL.x - 0.02, gripL.y, gripL.z + 0.04);
+}
+
+export function stepFirstPersonViewmodelRig(
+  fpvRig: FirstPersonViewmodelRig,
+  params: {
+    visible: boolean;
+    isParrying: boolean;
+    isAttacking: boolean;
+    activeMoveId: number;
+    swingProgress: number;
+    walkDistance: number;
+    moveSpeed: number;
+    timeSec: number;
+  }
+): void {
+  fpvRig.root.visible = params.visible;
+  if (!params.visible) return;
+
+  const isMoving = params.moveSpeed > 0.15;
+  const walkPhase = params.walkDistance * 2.8;
+  const bobX = isMoving ? Math.sin(walkPhase) * 0.022 : Math.sin(params.timeSec * 2.2) * 0.005;
+  const bobY = isMoving ? Math.abs(Math.cos(walkPhase)) * -0.024 : Math.cos(params.timeSec * 2.6) * 0.007;
+
+  // Base camera-space anchor: (0.28, -0.32, -0.65)
+  fpvRig.root.position.set(0.28 + bobX, -0.32 + bobY, -0.65);
+
+  // Default Chudan-no-Kamae guard angle in first-person viewport (Kote gauntlets + Tsuba + forward-angled Katana blade)
+  let px = 0.0;
+  let py = -0.14;
+  let pz = 0.0;
+  let rx = -0.34;
+  let ry = 0.28;
+  let rz = 0.22;
+
+  if (params.isParrying) {
+    // Diagonal Sekiro Deflect Guard raised across center of screen
+    px = -0.18;
+    py = 0.16;
+    pz = -0.08;
+    rx = 0.18;
+    ry = 0.55;
+    rz = -0.92;
+  } else if (params.isAttacking) {
+    const p = Math.max(0, Math.min(1, params.swingProgress));
+    const s = p * p * (3 - 2 * p);
+    switch (params.activeMoveId) {
+      case 1: // Kesagiri: Top-right to bottom-left diagonal cleave across screen
+        px = THREE.MathUtils.lerp(0.18, -0.52, s);
+        py = THREE.MathUtils.lerp(0.28, -0.24, s);
+        pz = -Math.sin(p * Math.PI) * 0.18;
+        rx = THREE.MathUtils.lerp(-0.45, 1.15, s);
+        ry = THREE.MathUtils.lerp(-0.42, 0.88, s);
+        rz = THREE.MathUtils.lerp(-0.38, 0.85, s);
+        break;
+      case 2: // Kiriage: Bottom-left to top-right rising slash
+        px = THREE.MathUtils.lerp(-0.48, 0.22, s);
+        py = THREE.MathUtils.lerp(-0.22, 0.28, s);
+        pz = -Math.sin(p * Math.PI) * 0.18;
+        rx = THREE.MathUtils.lerp(1.12, -0.38, s);
+        ry = THREE.MathUtils.lerp(0.82, -0.45, s);
+        rz = THREE.MathUtils.lerp(0.78, -0.42, s);
+        break;
+      case 3: // Wide Horizontal Sweep
+        px = THREE.MathUtils.lerp(0.24, -0.56, s);
+        py = 0.06;
+        pz = -Math.sin(p * Math.PI) * 0.22;
+        rx = 0.95;
+        ry = THREE.MathUtils.lerp(-0.85, 0.95, s);
+        rz = -1.18;
+        break;
+      case 4: // Tsuki Forward Heart Thrust
+        px = -0.14;
+        py = 0.08;
+        pz = -Math.sin(p * Math.PI) * 0.42;
+        rx = 1.28;
+        ry = 0.12;
+        rz = 0.0;
+        break;
+      case 5: // Whirlwind Slash
+        px = Math.cos(p * Math.PI * 2) * 0.34 - 0.14;
+        py = 0.05;
+        pz = -0.16;
+        rx = 0.98;
+        ry = (p - 0.5) * 1.8;
+        rz = -1.12;
+        break;
+      case 6: // Overhead Helm-Splitter Cleave
+      default:
+        px = -0.18;
+        py = THREE.MathUtils.lerp(0.36, -0.28, s);
+        pz = -Math.sin(p * Math.PI) * 0.24;
+        rx = THREE.MathUtils.lerp(-0.62, 1.38, s);
+        ry = 0.18;
+        rz = 0.08;
+        break;
+    }
+  }
+
+  fpvRig.gripPivot.position.set(px, py, pz);
+  fpvRig.gripPivot.rotation.set(rx, ry, rz);
+}
+
 
 // ============================================================================
 // BOTANICAL BAMBOO CANOPY & GNARLED JAPANESE TREE BUILDERS (ZERO CONES/CYLINDERS)

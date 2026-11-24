@@ -435,7 +435,8 @@ export class InteractiveComboDojoController {
     playerPos: THREE.Vector3,
     playerYaw: number,
     playerAttackNormalizedT: number | null,
-    nowSec: number
+    nowSec: number,
+    getGroundHeightAt?: (x: number, z: number) => number
   ): DojoTrainerSnapshot {
     const activeLesson = DOJO_CURRICULUM_LESSONS[this.activeLessonIndex];
     this.ghostMasterNormalizedTime =
@@ -449,10 +450,13 @@ export class InteractiveComboDojoController {
 
     if (this.ghostRig && this.trainerOpen) {
       this.ghostRig.root.visible = true;
-      // Position Ghost Master 2.2m to the right of the Samurai facing the same direction
+      // Position Ghost Master 2.2m to the right of the Samurai facing the same direction, grounded on terrain
       const rightX = Math.cos(playerYaw) * 2.2;
       const rightZ = -Math.sin(playerYaw) * 2.2;
-      this.ghostRig.root.position.set(playerPos.x + rightX, playerPos.y, playerPos.z + rightZ);
+      const ghostX = playerPos.x + rightX;
+      const ghostZ = playerPos.z + rightZ;
+      const ghostY = getGroundHeightAt ? getGroundHeightAt(ghostX, ghostZ) : playerPos.y;
+      this.ghostRig.root.position.set(ghostX, ghostY, ghostZ);
       this.ghostRig.root.rotation.y = playerYaw;
 
       const sample = evaluateSixMoveCombatTrajectory(

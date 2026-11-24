@@ -4,7 +4,11 @@
  */
 
 import React, { useEffect, useRef, useState } from 'react';
-import { SamuraiEngine, HUDStateSnapshot } from './game/SamuraiEngine';
+import {
+  SamuraiEngine,
+  HUDStateSnapshot,
+  MYTHIC_COMBAT_ARTS,
+} from './game/SamuraiEngine';
 import {
   WEAPONS,
   THROWABLES,
@@ -57,6 +61,8 @@ export default function App() {
   const canvasMountRef = useRef<HTMLDivElement | null>(null);
   const engineRef = useRef<SamuraiEngine | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const minimapCanvasRef = useRef<HTMLCanvasElement | null>(null);
+  const worldMapCanvasRef = useRef<HTMLCanvasElement | null>(null);
 
   const [hud, setHud] = useState<HUDStateSnapshot | null>(null);
   const [arsenalOpen, setArsenalOpen] = useState(false);
@@ -64,6 +70,7 @@ export default function App() {
     'weapons' | 'throwables' | 'armor' | 'helmets' | 'compendium_studio'
   >('weapons');
   const [shogunPanelOpen, setShogunPanelOpen] = useState(false);
+  const [worldMapOpen, setWorldMapOpen] = useState(false);
   const [dockCollapsed, setDockCollapsed] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
 
@@ -152,15 +159,26 @@ export default function App() {
     engine.inspectTargetSlotTelemetry('samurai');
 
     const onGlobalKey = (e: KeyboardEvent) => {
+      const targetTag = (e.target as HTMLElement)?.tagName;
+      if (targetTag === 'INPUT' || targetTag === 'TEXTAREA' || targetTag === 'SELECT') return;
+
       if (e.code === 'Tab' || e.code === 'KeyI') {
         e.preventDefault();
         setArsenalOpen((prev) => !prev);
+        setShogunPanelOpen(false);
+        setAssetStudioOpen(false);
+        setWorldMapOpen(false);
+      } else if (e.code === 'KeyM') {
+        e.preventDefault();
+        setWorldMapOpen((prev) => !prev);
+        setArsenalOpen(false);
         setShogunPanelOpen(false);
         setAssetStudioOpen(false);
       } else if (e.code === 'KeyN') {
         setShogunPanelOpen((prev) => !prev);
         setArsenalOpen(false);
         setAssetStudioOpen(false);
+        setWorldMapOpen(false);
       } else if (e.code === 'KeyL') {
         setAssetStudioOpen((prev) => {
           const next = !prev;
@@ -171,9 +189,10 @@ export default function App() {
         });
         setArsenalOpen(false);
         setShogunPanelOpen(false);
+        setWorldMapOpen(false);
       } else if (e.code === 'KeyH') {
         setDockCollapsed((prev) => !prev);
-      } else if (e.code === 'KeyM') {
+      } else if (e.code === 'KeyO') {
         const nextMuted = !engine.audio.getMuted();
         engine.audio.setMuted(nextMuted);
         setIsMuted(nextMuted);
@@ -187,6 +206,297 @@ export default function App() {
       engineRef.current = null;
     };
   }, []);
+
+  // ==========================================================================
+  // LIVE TOPOGRAPHIC MINIMAP (220x220) & FULL-SCREEN TACTICAL WORLD MAP (1200m x 1200m)
+  // ==========================================================================
+  useEffect(() => {
+    if (!hud) return;
+
+    const drawTacticalMap = (
+      canvas: HTMLCanvasElement | null,
+      radiusMeters: number,
+      isFullMap: boolean
+    ) => {
+      if (!canvas) return;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return;
+
+      const w = canvas.width;
+      const h = canvas.height;
+      const cx = w * 0.5;
+      const cy = h * 0.5;
+      const pxPerMeter = (Math.min(w, h) * 0.46) / radiusMeters;
+      const playerX = hud.playerWorldPos.x;
+      const playerZ = hud.playerWorldPos.z;
+
+      // 1. Dark Sumi-Washi Cartographic Background + Concentric Topographic Contours
+      ctx.clearRect(0, 0, w, h);
+      const bgGrad = ctx.createRadialGradient(cx, cy, 10, cx, cy, Math.max(w, h) * 0.55);
+      bgGrad.addColorStop(0, '#1e1914');
+      bgGrad.addColorStop(0.75, '#130f0c');
+      bgGrad.addColorStop(1, '#0b0806');
+      ctx.fillStyle = bgGrad;
+      ctx.fillRect(0, 0, w, h);
+
+      // 80m Chunk Grid Lines
+      ctx.strokeStyle = 'rgba(214, 199, 178, 0.12)';
+      ctx.lineWidth = 1;
+      const chunkStepM = 80;
+      const startGridX = Math.floor((playerX - radiusMeters) / chunkStepM) * chunkStepM;
+      const endGridX = Math.ceil((playerX + radiusMeters) / chunkStepM) * chunkStepM;
+      for (let gx = startGridX; gx <= endGridX; gx += chunkStepM) {
+        const sx = cx + (gx - playerX) * pxPerMeter;
+        ctx.beginPath();
+        ctx.moveTo(sx, 0);
+        ctx.lineTo(sx, h);
+        ctx.stroke();
+      }
+      const startGridZ = Math.floor((playerZ - radiusMeters) / chunkStepM) * chunkStepM;
+      const endGridZ = Math.ceil((playerZ + radiusMeters) / chunkStepM) * chunkStepM;
+      for (let gz = startGridZ; gz <= endGridZ; gz += chunkStepM) {
+        const sy = cy + (gz - playerZ) * pxPerMeter;
+        ctx.beginPath();
+        ctx.moveTo(0, sy);
+        ctx.lineTo(w, sy);
+        ctx.stroke();
+      }
+
+      // Topographic Radar Rings
+      ctx.strokeStyle = 'rgba(251, 191, 36, 0.16)';
+      for (const ringFrac of [0.33, 0.66, 0.95]) {
+        ctx.beginPath();
+        ctx.arc(cx, cy, Math.min(w, h) * 0.46 * ringFrac, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      // 2. Spline-Carved Blue Waterway River Path: x_river(z) = 18 * sin(0.015 * z) + 6 * cos(0.04 * z)
+      ctx.save();
+      ctx.strokeStyle = 'rgba(56, 189, 248, 0.65)';
+      ctx.lineWidth = isFullMap ? 8 : 5;
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      const zMin = playerZ - radiusMeters;
+      const zMax = playerZ + radiusMeters;
+      const zStep = isFullMap ? 12 : 6;
+      let firstPt = true;
+      for (let wz = zMin; wz <= zMax; wz += zStep) {
+        const rx = 18.0 * Math.sin(wz * 0.015) + 6.0 * Math.cos(wz * 0.04);
+        const sx = cx + (rx - playerX) * pxPerMeter;
+        const sy = cy + (wz - playerZ) * pxPerMeter;
+        if (firstPt) {
+          ctx.moveTo(sx, sy);
+          firstPt = false;
+        } else {
+          ctx.lineTo(sx, sy);
+        }
+      }
+      ctx.stroke();
+      ctx.restore();
+
+      // 3. Draw Landmarks: Wooden Bridges, Caves (Cyan Arch), Torii Shrines (Gold), and World Bosses (Crimson Oni Skull)
+      for (const lm of hud.worldMapLandmarks) {
+        const dx = lm.worldX - playerX;
+        const dz = lm.worldZ - playerZ;
+        const distMeters = Math.round(Math.hypot(dx, dz));
+        let sx = cx + dx * pxPerMeter;
+        let sy = cy + dz * pxPerMeter;
+        const margin = isFullMap ? 26 : 16;
+        const isOutOfBounds =
+          sx < margin || sx > w - margin || sy < margin || sy > h - margin;
+
+        if (isOutOfBounds && lm.type !== 'world_boss') {
+          continue;
+        }
+
+        if (lm.type === 'bridge') {
+          ctx.save();
+          ctx.translate(sx, sy);
+          ctx.fillStyle = '#d97706';
+          ctx.strokeStyle = '#fef3c7';
+          ctx.lineWidth = 1.2;
+          ctx.fillRect(-5, -3, 10, 6);
+          ctx.strokeRect(-5, -3, 10, 6);
+          ctx.restore();
+        } else if (lm.type === 'torii_shrine') {
+          ctx.save();
+          ctx.translate(sx, sy);
+          ctx.strokeStyle = '#fbbf24';
+          ctx.lineWidth = 2;
+          // Golden Torii Icon
+          ctx.beginPath();
+          ctx.moveTo(-6, -4);
+          ctx.lineTo(6, -4);
+          ctx.moveTo(-4, -1);
+          ctx.lineTo(4, -1);
+          ctx.moveTo(-3.5, -4);
+          ctx.lineTo(-3.5, 5);
+          ctx.moveTo(3.5, -4);
+          ctx.lineTo(3.5, 5);
+          ctx.stroke();
+          if (isFullMap && (lm.id.includes('origin') || distMeters <= 125)) {
+            ctx.fillStyle = '#fde68a';
+            ctx.font = 'bold 10px sans-serif';
+            ctx.fillText(lm.name, 8, 3);
+          }
+          ctx.restore();
+        } else if (lm.type === 'cave_entrance') {
+          // Glowing Cyan Cave Arch Icon
+          ctx.save();
+          ctx.translate(sx, sy);
+          ctx.strokeStyle = '#22d3ee';
+          ctx.fillStyle = 'rgba(8, 145, 178, 0.45)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(0, 2, 5.5, Math.PI, 0, false);
+          ctx.lineTo(5.5, 5);
+          ctx.lineTo(-5.5, 5);
+          ctx.closePath();
+          ctx.fill();
+          ctx.stroke();
+          if (isFullMap && distMeters <= 135) {
+            ctx.fillStyle = '#67e8f9';
+            ctx.font = '10px sans-serif';
+            ctx.fillText(`${lm.kanji} Cave (${distMeters}m)`, 8, 3);
+          }
+          ctx.restore();
+        } else if (lm.type === 'world_boss') {
+          // World Boss Spawns (Crimson Oni Skull Icon + Boss Name + Distance Meters; clamped to edge if out of range)
+          let clampedX = sx;
+          let clampedY = sy;
+          if (isOutOfBounds) {
+            const ang = Math.atan2(dz, dx);
+            const edgeR = Math.min(w, h) * 0.5 - margin;
+            clampedX = cx + Math.cos(ang) * edgeR;
+            clampedY = cy + Math.sin(ang) * edgeR;
+
+            // Direction arrow on minimap perimeter
+            ctx.save();
+            ctx.translate(clampedX, clampedY);
+            ctx.rotate(ang);
+            ctx.fillStyle = '#ef4444';
+            ctx.beginPath();
+            ctx.moveTo(9, 0);
+            ctx.lineTo(2, -4);
+            ctx.lineTo(2, 4);
+            ctx.closePath();
+            ctx.fill();
+            ctx.restore();
+          }
+
+          ctx.save();
+          ctx.translate(clampedX, clampedY);
+          // Crimson Oni Skull Circle + Horns
+          ctx.fillStyle = '#991b1b';
+          ctx.strokeStyle = '#fca5a5';
+          ctx.lineWidth = 1.6;
+          ctx.beginPath();
+          ctx.arc(0, 0, isFullMap ? 7 : 5.5, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.stroke();
+          // Gold Oni Horns
+          ctx.strokeStyle = '#fbbf24';
+          ctx.beginPath();
+          ctx.moveTo(-3.5, -4);
+          ctx.lineTo(-6, -8);
+          ctx.moveTo(3.5, -4);
+          ctx.lineTo(6, -8);
+          ctx.stroke();
+          // Glowing eyes
+          ctx.fillStyle = '#fef08a';
+          ctx.fillRect(-2.5, -1.5, 1.8, 1.8);
+          ctx.fillRect(0.8, -1.5, 1.8, 1.8);
+
+          // Boss Name & Distance label
+          ctx.fillStyle = '#fecaca';
+          ctx.font = isFullMap ? 'bold 11px sans-serif' : 'bold 8.5px sans-serif';
+          const shortName = lm.name.split(' ')[0];
+          const labelText = isFullMap
+            ? `${lm.kanji} ${lm.name} (${distMeters}m)`
+            : `${shortName} ${distMeters}m`;
+          ctx.fillText(
+            labelText,
+            clampedX > w * 0.62 ? -ctx.measureText(labelText).width - 8 : 8,
+            3
+          );
+          ctx.restore();
+        }
+      }
+
+      // 4. Active Enemy Patrols (Red Triangles)
+      for (const foe of hud.enemyRadarPoints) {
+        const dx = foe.x - playerX;
+        const dz = foe.z - playerZ;
+        const sx = cx + dx * pxPerMeter;
+        const sy = cy + dz * pxPerMeter;
+        if (sx < 8 || sx > w - 8 || sy < 8 || sy > h - 8) continue;
+
+        ctx.save();
+        ctx.translate(sx, sy);
+        ctx.fillStyle = foe.isBoss ? '#fbbf24' : '#ef4444';
+        ctx.strokeStyle = '#181411';
+        ctx.lineWidth = 1;
+        const sz = foe.isBoss ? 6 : 4.2;
+        ctx.beginPath();
+        ctx.moveTo(0, -sz);
+        ctx.lineTo(sz, sz);
+        ctx.lineTo(-sz, sz);
+        ctx.closePath();
+        ctx.fill();
+        ctx.stroke();
+        ctx.restore();
+      }
+
+      // 5. Player Arrow + Camera Field-of-View Cone at Center (cx, cy)
+      // Camera forward in world space: (sin(camYaw), cos(camYaw)) -> screen angle = atan2(cos(camYaw), sin(camYaw))
+      const camScreenAngle = Math.atan2(Math.cos(hud.camYaw), Math.sin(hud.camYaw));
+      const fovHalf = 0.48;
+      const coneLen = isFullMap ? 58 : 38;
+      ctx.save();
+      ctx.translate(cx, cy);
+      const coneGrad = ctx.createRadialGradient(0, 0, 2, 0, 0, coneLen);
+      coneGrad.addColorStop(0, 'rgba(251, 191, 36, 0.36)');
+      coneGrad.addColorStop(1, 'rgba(251, 191, 36, 0.0)');
+      ctx.fillStyle = coneGrad;
+      ctx.beginPath();
+      ctx.moveTo(0, 0);
+      ctx.arc(0, 0, coneLen, camScreenAngle - fovHalf, camScreenAngle + fovHalf);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+
+      // Player Directional Arrow
+      const playerScreenAngle = Math.atan2(Math.cos(hud.playerYaw), Math.sin(hud.playerYaw));
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(playerScreenAngle);
+      ctx.fillStyle = '#38bdf8';
+      ctx.strokeStyle = '#f3ebd9';
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(8, 0);
+      ctx.lineTo(-6, -5.5);
+      ctx.lineTo(-3, 0);
+      ctx.lineTo(-6, 5.5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.stroke();
+      ctx.restore();
+
+      // Compass Cardinal Labels (N / E / S / W)
+      ctx.fillStyle = '#fbbf24';
+      ctx.font = 'bold 10px sans-serif';
+      ctx.fillText('N', cx - 4, 12);
+      ctx.fillText('S', cx - 4, h - 4);
+      ctx.fillText('W', 4, cy + 4);
+      ctx.fillText('E', w - 12, cy + 4);
+    };
+
+    drawTacticalMap(minimapCanvasRef.current, 165, false);
+    if (worldMapOpen) {
+      drawTacticalMap(worldMapCanvasRef.current, 600, true);
+    }
+  }, [hud, worldMapOpen]);
 
   const handleRefreshTelemetry = (slot: AssetTargetSlot) => {
     setAssetTargetSlot(slot);
@@ -466,7 +776,7 @@ export default function App() {
         }}
       />
 
-      {/* Floating Damage & Parry Callouts */}
+      {/* Floating Damage, Parry Callouts & 忍殺 EXECUTE [F] Prompt */}
       {hud && hud.gameState === 'playing' && !hud.customizerMode && (
         <div className="fixed inset-0 pointer-events-none z-20 overflow-hidden">
           {hud.floatingNumbers.map((ft) => (
@@ -484,6 +794,44 @@ export default function App() {
               {ft.text}
             </div>
           ))}
+
+          {/* Glowing Crimson 忍殺 EXECUTE [F] Prompt above staggered or low-HP (< 25%) enemies */}
+          {hud.executeTargetPrompt && (
+            <div
+              data-testid="execute-prompt-banner"
+              className="absolute pointer-events-auto cursor-pointer px-3 py-1.5 rounded bg-[#991b1b]/95 border-2 border-[#fbbf24] text-[#fef3c7] shadow-lg animate-pulse"
+              style={{
+                left: `${hud.executeTargetPrompt.screenXPercent}%`,
+                top: `${hud.executeTargetPrompt.screenYPercent}%`,
+                transform: 'translate(-50%, -100%)',
+              }}
+              onClick={() => engineRef.current?.triggerZanshinFinisherOrThrowable()}
+            >
+              <div className="text-xs font-extrabold tracking-widest font-display text-center whitespace-nowrap">
+                忍殺 EXECUTE [F]
+              </div>
+              <div className="text-[10px] text-[#fde68a] font-mono-num text-center whitespace-nowrap">
+                {hud.executeTargetPrompt.enemyName}
+              </div>
+            </div>
+          )}
+
+          {/* Active Cinematic Finisher Cutscene Banner */}
+          {hud.activeCinematicFinisher && (
+            <div className="absolute inset-x-0 top-24 flex justify-center">
+              <div className="sumi-bar-frame px-6 py-2.5 rounded border-2 border-[#fbbf24] bg-[#7f1d1d]/90 text-center">
+                <div className="text-xs tracking-[0.25em] text-[#fde68a] font-bold">
+                  忍殺 CINEMATIC EXECUTION · 0.25× ZANSHIN SLOW-MOTION
+                </div>
+                <div className="text-xl font-bold font-display text-[#f3ebd9]">
+                  {hud.activeCinematicFinisher.kanji} · {hud.activeCinematicFinisher.name}
+                </div>
+                <div className="text-xs text-[#fecaca]">
+                  {hud.activeCinematicFinisher.subtitle}
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 
@@ -639,7 +987,7 @@ export default function App() {
 
           {/* Single Flat Borderless Control-Hint Line in Bottom Safe Margin */}
           <div className="text-xs text-[#d6c7b2] tracking-wide">
-            WASD Move · [V] 3-Mode Camera (3rd-Person RPG / 1st-Person FPV / Isometric) · LMB 6-Move Combo · RMB Sekiro Deflect · L 3D Asset Dropper · K 3D Face Studio · Tab Armory (35)
+            WASD Move · [V] 3-Mode Camera (3rd-Person RPG / 1st-Person FPV / Isometric) · [M] World Map · [F] Execute · [1-4] Mythic Arts · LMB 6-Move Combo · RMB Sekiro Deflect
           </div>
         </main>
       )}
@@ -649,7 +997,7 @@ export default function App() {
           ==================================================================== */}
       {hud && hud.gameState !== 'title' && !hud.customizerMode && (
         <div className="fixed inset-0 z-20 pointer-events-none flex flex-col justify-between p-4 md:p-6">
-          {/* TOP ROW: Left Vitality/Posture/Ki Cluster | Center Boss & Elemental Bar | Right AI Telemetry */}
+          {/* TOP ROW: Left Vitality/Posture/Ki Cluster | Center Boss & Elemental Bar | Right Minimap & Controls */}
           <div className="flex items-start justify-between gap-4">
             {/* Top-Left Cluster: Brush-Stroke Vitality, Posture, Ki & Armor Integrity */}
             <div className="sumi-bar-frame px-4 py-3 rounded w-72 shrink-0">
@@ -725,7 +1073,7 @@ export default function App() {
                   CDLOD {hud.openWorldTelemetry.activeChunkCount} Chunks · {hud.openWorldTelemetry.currentBiome.kanji}
                 </span>
                 <span className="text-[#38bdf8] shrink-0 ml-1">
-                  POM {hud.activePbrBundle?.pomSteps ?? 16}st
+                  ({hud.playerWorldPos.x}m, {hud.playerWorldPos.z}m)
                 </span>
               </div>
             </div>
@@ -749,13 +1097,14 @@ export default function App() {
                   <button
                     type="button"
                     data-ui-interactive="true"
+                    data-execute-button="true"
                     onClick={(e) => {
                       e.currentTarget.blur();
                       engineRef.current?.triggerZanshinFinisherOrThrowable();
                     }}
-                    className="pointer-events-auto px-2 py-0.5 text-[10px] font-bold bg-[#dc2626] text-[#fef3c7] border border-[#fbbf24] rounded cursor-pointer whitespace-nowrap shrink-0"
+                    className="pointer-events-auto px-2.5 py-0.5 text-[10px] font-bold bg-[#dc2626] text-[#fef3c7] border border-[#fbbf24] rounded cursor-pointer whitespace-nowrap shrink-0 animate-pulse"
                   >
-                    [F] 残心 ZANSHIN
+                    忍殺 EXECUTE [F]
                   </button>
                 )}
                 <button
@@ -769,6 +1118,18 @@ export default function App() {
                   className="pointer-events-auto px-2 py-0.5 text-[10px] font-semibold bg-[#17222b] hover:bg-[#1e2f3d] text-[#38bdf8] border border-[#38bdf8]/70 rounded cursor-pointer whitespace-nowrap shrink-0"
                 >
                   [V] {hud.cameraModeLabel}
+                </button>
+                <button
+                  type="button"
+                  data-ui-interactive="true"
+                  data-world-map-toggle="true"
+                  onClick={(e) => {
+                    e.currentTarget.blur();
+                    setWorldMapOpen((prev) => !prev);
+                  }}
+                  className="pointer-events-auto px-2 py-0.5 text-[10px] font-semibold bg-[#292018] hover:bg-[#3a2d22] text-[#fbbf24] border border-[#fbbf24]/70 rounded cursor-pointer whitespace-nowrap shrink-0"
+                >
+                  [M] World Map
                 </button>
                 <button
                   type="button"
@@ -869,7 +1230,7 @@ export default function App() {
               )}
             </div>
 
-            {/* Top-Right Cluster: Live AI Adaptation Telemetry + Compact Utility Buttons */}
+            {/* Top-Right Cluster: Compact Utility Buttons + 220x220px Live Topographic Radar Minimap */}
             <div className="flex flex-col items-end gap-2 shrink-0">
               <div className="flex items-center gap-1.5 pointer-events-auto" data-ui-interactive="true">
                 <button
@@ -883,6 +1244,7 @@ export default function App() {
                     setAssetStudioOpen((p) => !p);
                     setArsenalOpen(false);
                     setShogunPanelOpen(false);
+                    setWorldMapOpen(false);
                   }}
                   className="px-2.5 py-2 sumi-bar-frame rounded text-xs font-medium text-[#34d399] hover:border-[#34d399] cursor-pointer whitespace-nowrap shrink-0"
                 >
@@ -908,6 +1270,7 @@ export default function App() {
                     setArsenalOpen((p) => !p);
                     setShogunPanelOpen(false);
                     setAssetStudioOpen(false);
+                    setWorldMapOpen(false);
                   }}
                   className="px-2.5 py-2 sumi-bar-frame rounded text-xs font-medium text-[#f3ebd9] hover:border-[#fbbf24] cursor-pointer whitespace-nowrap shrink-0"
                 >
@@ -922,6 +1285,7 @@ export default function App() {
                     setShogunPanelOpen((p) => !p);
                     setArsenalOpen(false);
                     setAssetStudioOpen(false);
+                    setWorldMapOpen(false);
                   }}
                   className="px-2.5 py-2 sumi-bar-frame rounded text-xs font-medium text-[#fbbf24] hover:border-[#fbbf24] cursor-pointer whitespace-nowrap shrink-0"
                 >
@@ -957,45 +1321,30 @@ export default function App() {
                 </button>
               </div>
 
-              {/* Live Adaptive AI Telemetry Panel */}
-              <div className="sumi-bar-frame px-3.5 py-2.5 rounded w-72 text-xs">
-                <div className="flex items-center justify-between border-b border-[#3d322a] pb-1 mb-1.5">
-                  <span className="font-semibold text-[#fbbf24]">
-                    AI ADAPTATION STATE
-                  </span>
-                  <span className="font-mono-num text-[11px] text-[#d6c7b2]">
-                    Tier {hud.aiSnapshot.learningTier.toFixed(2)}x
+              {/* 220x220px Live Topographic Radar Minimap in Japanese Gold/Lacquer Border */}
+              <div
+                className="sumi-bar-frame p-1.5 rounded border-2 border-[#fbbf24]/80 pointer-events-auto cursor-pointer"
+                data-ui-interactive="true"
+                title="Click or press [M] to open Full-Screen Tactical World Map (1200m × 1200m)"
+                onClick={() => setWorldMapOpen(true)}
+              >
+                <div className="flex items-center justify-between text-[10px] font-mono-num text-[#fbbf24] px-1 pb-1">
+                  <span className="font-bold tracking-wider">地図 RADAR [M]</span>
+                  <span className="text-[#d6c7b2]">
+                    {hud.playerWorldPos.x}m, {hud.playerWorldPos.z}m
                   </span>
                 </div>
-                <p className="text-[11px] text-[#f3ebd9] font-medium mb-0.5">
-                  {hud.aiSnapshot.activePostureStance}
-                </p>
-                <p className="text-[11px] text-[#fbbf24] font-semibold tracking-wide mb-1.5">
-                  {hud.aiSnapshot.activeCounterCallout}
-                </p>
-                <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-[11px] text-[#c7b79e] font-mono-num">
-                  <div>Melee Spam: {Math.round(hud.aiSnapshot.meleeSpamRate * 100)}%</div>
-                  <div>Auto-Parry: {Math.round(hud.aiSnapshot.autoParryProb * 100)}%</div>
-                  <div>Ranged Rel: {Math.round(hud.aiSnapshot.rangedDependency * 100)}%</div>
-                  <div>Zig-Zag Dash: {Math.round(hud.aiSnapshot.zigZagSprintProb * 100)}%</div>
-                  <div>Parry Acc: {Math.round(hud.aiSnapshot.parryTimingAccuracy * 100)}%</div>
-                  <div>
-                    Dodge: {hud.aiSnapshot.preferredDodgeVector.toUpperCase()} (
-                    {Math.round(hud.aiSnapshot.dodgePredictProb * 100)}%)
-                  </div>
-                </div>
-                <div className="mt-1.5 pt-1 border-t border-[#3d322a] text-[10px] font-mono-num text-[#a7f3d0] truncate">
-                  T_player = [
-                  {[
-                    hud.aiSnapshot.meleeSpamRate,
-                    hud.aiSnapshot.rangedDependency,
-                    hud.aiSnapshot.dodgePredictProb,
-                    hud.aiSnapshot.parryTimingAccuracy,
-                    hud.aiSnapshot.jumpFrequency,
-                  ]
-                    .map((v: number) => v.toFixed(2))
-                    .join(', ')}
-                  ]
+                <canvas
+                  ref={minimapCanvasRef}
+                  data-testid="hud-minimap-canvas"
+                  width={220}
+                  height={220}
+                  className="block rounded border border-[#4a3b31]"
+                />
+                <div className="flex items-center justify-between text-[9px] text-[#c7b79e] px-1 pt-1 font-mono-num">
+                  <span className="text-[#fca5a5]">● Boss Skulls</span>
+                  <span className="text-[#67e8f9]">∩ Caves</span>
+                  <span className="text-[#fde68a]">⛩ Shrines</span>
                 </div>
               </div>
             </div>
@@ -1123,8 +1472,33 @@ export default function App() {
             </aside>
           )}
 
-          {/* BOTTOM COLLAPSIBLE WEAPON, NINJUTSU & 5 ELEMENTAL INFUSIONS DOCK */}
+          {/* BOTTOM COLLAPSIBLE WEAPON, 4 MYTHIC COMBAT ARTS [1-4], NINJUTSU & 5 ELEMENTAL INFUSIONS DOCK */}
           <div className="self-center flex flex-col items-center pointer-events-auto" data-ui-interactive="true">
+            {/* 4 Flashy Mythic Combat Arts Strip ([1] Sakura Dance, [2] Ashina Cross, [3] Mortal Crimson Wave, [4] Raijin Thunder Plunge) */}
+            <div className="flex flex-wrap items-center justify-center gap-1 mb-1">
+              {MYTHIC_COMBAT_ARTS.map((art) => {
+                const isActiveArt = hud.activeMythicArt?.id === art.id;
+                return (
+                  <button
+                    key={art.id}
+                    type="button"
+                    data-mythic-art={art.slot}
+                    onClick={(e) => {
+                      e.currentTarget.blur();
+                      engineRef.current?.triggerMythicCombatArt(art.slot);
+                    }}
+                    className={`px-2.5 py-1 rounded text-[10px] font-bold border transition-colors cursor-pointer whitespace-nowrap ${
+                      isActiveArt
+                        ? 'bg-[#991b1b] text-[#fef3c7] border-[#fbbf24]'
+                        : 'bg-[#1e1612]/95 text-[#f3ebd9] border-[#78350f] hover:border-[#fbbf24]'
+                    }`}
+                  >
+                    [{art.slot}] {art.kanji} {art.name}
+                  </button>
+                );
+              })}
+            </div>
+
             <div className="flex items-center gap-1 mb-0.5">
               {ELEMENTAL_INFUSIONS.filter((inf) => inf.id !== 'none').map((inf) => {
                 const active = hud.activeInfusion === inf.id;
@@ -1142,7 +1516,7 @@ export default function App() {
                         : 'bg-[#181411] text-[#c7b79e] border-[#4a3b31] hover:text-[#f3ebd9]'
                     }`}
                   >
-                    [{inf.hotkey}] {inf.kanji.split('・')[0]} {inf.name.split(' ')[0]}
+                    [{inf.hotkey === 'V' ? 'U' : inf.hotkey}] {inf.kanji.split('・')[0]} {inf.name.split(' ')[0]}
                   </button>
                 );
               })}
@@ -1263,7 +1637,7 @@ export default function App() {
                   )}
                   <div>
                     <div className="text-[10px] text-[#fbbf24] font-mono-num">
-                      [F/R] Ninjutsu · Stock {hud.throwableStock}/{hud.equippedThrowable.maxStock}
+                      [R] Ninjutsu · Stock {hud.throwableStock}/{hud.equippedThrowable.maxStock}
                       {hud.throwableCooldown > 0 ? ` (${hud.throwableCooldown}s)` : ''}
                     </div>
                     <div className="text-xs font-semibold whitespace-nowrap">
@@ -1294,6 +1668,126 @@ export default function App() {
                 </div>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* ====================================================================
+          FULL-SCREEN TACTICAL WORLD MAP MODAL (Press [M] Key / Radar Click)
+          1200m × 1200m Radius with World Bosses, Caves, Bridges, Shrines & Legend
+          ==================================================================== */}
+      {hud && worldMapOpen && (
+        <div
+          role="dialog"
+          aria-label="Full-Screen Tactical World Map"
+          data-ui-interactive="true"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-[#0c0907]/90"
+        >
+          <div className="washi-card rounded-lg border-2 border-[#fbbf24] p-5 max-w-5xl w-full text-[#f3ebd9]">
+            <div className="flex flex-wrap items-center justify-between gap-3 border-b border-[#3d322a] pb-3 mb-4">
+              <div>
+                <p className="text-[11px] tracking-[0.2em] text-[#fbbf24] font-semibold">
+                  戦術大地図 · 1200M × 1200M INFINITE ARCHIPELAGO TACTICAL RADAR
+                </p>
+                <h2 className="text-xl font-bold font-display">
+                  Province: {hud.openWorldTelemetry.currentBiome.name} ({hud.openWorldTelemetry.currentBiome.kanji}) · Coordinates ({hud.playerWorldPos.x}m, {hud.playerWorldPos.z}m)
+                </h2>
+              </div>
+              <button
+                type="button"
+                data-close-world-map="true"
+                onClick={() => setWorldMapOpen(false)}
+                className="px-4 py-1.5 text-xs font-bold bg-[#991b1b] hover:bg-[#b91c1c] border border-[#fbbf24] rounded cursor-pointer"
+              >
+                Close Map [M / Esc]
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
+              <div className="lg:col-span-2 flex justify-center bg-[#120e0b] p-2 rounded border border-[#4a3b31]">
+                <canvas
+                  ref={worldMapCanvasRef}
+                  data-testid="fullscreen-world-map-canvas"
+                  width={760}
+                  height={520}
+                  className="max-w-full h-auto rounded border border-[#fbbf24]/50"
+                />
+              </div>
+
+              <div className="space-y-3 text-xs">
+                <div className="p-3 rounded bg-[#14100d] border border-[#3d322a]">
+                  <div className="font-bold text-[#fbbf24] mb-2 tracking-wider">
+                    CARTOGRAPHIC LEGEND · 凡例
+                  </div>
+                  <ul className="space-y-1.5 text-[#d6c7b2]">
+                    <li className="flex items-center gap-2">
+                      <span className="inline-block w-3 h-3 rounded-full bg-[#38bdf8] border border-white" />
+                      <span>Samurai Position + Camera FOV Cone</span>
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <span className="inline-block w-3 h-3 rounded-full bg-[#991b1b] border border-[#fbbf24]" />
+                      <span className="text-[#fca5a5] font-semibold">
+                        Crimson Oni Skull: Major World Boss Spawns
+                      </span>
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <span className="inline-block w-3 h-3 rounded bg-[#0891b2] border border-[#22d3ee]" />
+                      <span className="text-[#67e8f9]">
+                        Cyan Cave Arch: Subterranean Marching-Cubes Caves
+                      </span>
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <span className="inline-block w-3 h-3 rounded bg-[#d97706] border border-[#fef3c7]" />
+                      <span>Catenary Wooden Bridges &amp; Spline Rivers</span>
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <span className="inline-block w-3 h-3 rounded bg-[#fbbf24]" />
+                      <span className="text-[#fde68a]">Golden Torii Shrines &amp; Martial Dojos</span>
+                    </li>
+                    <li className="flex items-center gap-2">
+                      <span className="inline-block w-3 h-3 bg-[#ef4444]" />
+                      <span>Red Triangles: Active Roaming Enemy Patrols ({hud.enemyRadarPoints.length})</span>
+                    </li>
+                  </ul>
+                </div>
+
+                <div className="p-3 rounded bg-[#14100d] border border-[#3d322a]">
+                  <div className="font-bold text-[#fca5a5] mb-2 tracking-wider">
+                    WORLD BOSS SPAWN TRACKER · 鬼首領
+                  </div>
+                  <div className="space-y-1.5 font-mono-num">
+                    {hud.worldMapLandmarks
+                      .filter((lm) => lm.type === 'world_boss')
+                      .map((boss) => {
+                        const dist = Math.round(
+                          Math.hypot(
+                            boss.worldX - hud.playerWorldPos.x,
+                            boss.worldZ - hud.playerWorldPos.z
+                          )
+                        );
+                        return (
+                          <div
+                            key={boss.id}
+                            className="flex items-center justify-between p-1.5 rounded bg-[#1c1512] border border-[#7f1d1d]"
+                          >
+                            <div>
+                              <div className="font-bold text-[#fef2f2]">
+                                {boss.kanji} · {boss.name}
+                              </div>
+                              <div className="text-[10px] text-[#fca5a5]">
+                                ({boss.worldX}m, {boss.worldZ}m)
+                              </div>
+                            </div>
+                            <span className="px-2 py-0.5 rounded bg-[#991b1b] text-[#fef3c7] font-bold">
+                              {dist}m
+                            </span>
+                          </div>
+                        );
+                      })}
+                  </div>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}

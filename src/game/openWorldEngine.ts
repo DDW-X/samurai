@@ -5,6 +5,7 @@ import {
   createSplineLatheGeometry,
   createTubularPathGeometry,
 } from './proceduralMeshes';
+import { StaticCollider } from './multiPhysics';
 
 export type OpenWorldBiomeId =
   | 'crimson_momiji_valley'
@@ -364,6 +365,18 @@ export function createShallowWaterWaveMaterial(waterTintHex = 0x164e63): THREE.S
 /**
  * Quadtree CDLOD Terrain Chunk Entry & Floating Origin Manager
  */
+export interface RegisteredBridge {
+  id: string;
+  worldX: number;
+  worldZ: number;
+  halfWidth: number;
+  halfLength: number;
+  baseY: number;
+  archHeight: number;
+  group?: THREE.Group;
+  planks?: THREE.Mesh[];
+}
+
 export interface CDLODChunkEntry {
   key: string;
   chunkX: number;
@@ -372,6 +385,8 @@ export interface CDLODChunkEntry {
   mesh: THREE.Mesh;
   propGroup: THREE.Group;
   disposableMaterials: THREE.Material[];
+  /** Static colliders stored in true world coordinates (converted to local via accumulatedOffset) */
+  worldStaticColliders: StaticCollider[];
   caveOverhangMesh?: THREE.Mesh;
   dominantBiome: OpenWorldBiomeDefinition;
 }
@@ -398,12 +413,16 @@ export class InfiniteOpenWorldCDLODManager {
   public waterMesh: THREE.Mesh | null = null;
   public waterMaterial: THREE.ShaderMaterial | null = null;
   public bridgeGroup = new THREE.Group();
+  public readonly registeredBridges: RegisteredBridge[] = [];
 
   private accumulatedOffset = new THREE.Vector3(0, 0, 0);
   private shiftCount = 0;
   private disposedCount = 0;
   private lastCenterChunkX = 99999;
   private lastCenterChunkZ = 99999;
+  private lastWaterCenterWorldX = Number.NaN;
+  private cachedLocalChunkColliders: StaticCollider[] = [];
+  private collidersDirty = true;
 
   // Shared high-subdivision procedural geometries for zero-leak chunk prop population
   private sharedGrassGeo: THREE.BufferGeometry | null = null;
@@ -489,24 +508,140 @@ export class InfiniteOpenWorldCDLODManager {
     );
   }
 
+  public getAccumulatedOffset(): { x: number; y: number; z: number } {
+    return {
+      x: this.accumulatedOffset.x,
+      y: this.accumulatedOffset.y,
+      z: this.accumulatedOffset.z,
+    };
+  }
+
+  public registerBridge(bridge: RegisteredBridge): void {
+    const existingIdx = this.registeredBridges.findIndex((b) => b.id === bridge.id);
+    if (existingIdx >= 0) {
+      this.registeredBridges[existingIdx] = bridge;
+    } else {
+      this.registeredBridges.push(bridge);
+    }
+  }
+
+  public findRegisteredBridgeAtWorld(
+    trueWorldX: number,
+    trueWorldZ: number
+  ): { bridge: RegisteredBridge; uNorm: number } | null {
+    for (let i = 0; i < this.registeredBridges.length; i++) {
+      const b = this.registeredBridges[i];
+      if (
+        Math.abs(trueWorldX - b.worldX) <= b.halfWidth &&
+        Math.abs(trueWorldZ - b.worldZ) <= b.halfLength
+      ) {
+        const uNorm = (trueWorldZ - (b.worldZ - b.halfLength)) / (b.halfLength * 2);
+        return { bridge: b, uNorm: Math.max(0, Math.min(1, uNorm)) };
+      }
+    }
+    return null;
+  }
+
   /**
-   * Computes exact ground or arched Taiko-bashi bridge height at any local (x, z) position
-   * so the Samurai, enemies, and props follow the continuous 3D topography and bridges.
+   * Computes exact ground or physically registered arched Taiko-bashi bridge height at any local (x, z)
+   * position so the Samurai, enemies, physics bodies, and decals follow the continuous 3D topography.
+   * Single Source of Truth: ONLY bridges in `this.registeredBridges` elevate terrain.
    */
   public getGroundAndBridgeHeightAt(localX: number, localZ: number): number {
     const trueWorldX = localX + this.accumulatedOffset.x;
     const trueWorldZ = localZ + this.accumulatedOffset.z;
-    const riverZ = evaluateRiverCenterlineZ(trueWorldX);
-    const bridgeHalfLen = 9.0;
-    // Arched bridge spans across the river at localX in [-2.1, 2.1] and every 160m along X
-    const nearestBridgeX = Math.round(trueWorldX / 160) * 160;
-    const onBridgeX = Math.abs(trueWorldX - nearestBridgeX) <= 2.15;
-    const bridgeRiverZ = evaluateRiverCenterlineZ(nearestBridgeX);
-    if (onBridgeX && Math.abs(trueWorldZ - bridgeRiverZ) <= bridgeHalfLen) {
-      const u = (trueWorldZ - (bridgeRiverZ - bridgeHalfLen)) / (bridgeHalfLen * 2);
-      return evaluateCatenaryBridgeHeight(u, 0.1, 2.15, u);
+    const bridgeHit = this.findRegisteredBridgeAtWorld(trueWorldX, trueWorldZ);
+    if (bridgeHit) {
+      return evaluateCatenaryBridgeHeight(
+        bridgeHit.uNorm,
+        bridgeHit.bridge.baseY,
+        bridgeHit.bridge.archHeight,
+        bridgeHit.uNorm
+      );
     }
     return evaluateMultifractalTerrainHeight(trueWorldX, trueWorldZ);
+  }
+
+  /**
+   * Computes unit-length terrain/bridge surface normal at local (x, z) via central finite differences.
+   */
+  public getGroundNormalAt(localX: number, localZ: number, sampleStep = 0.35): THREE.Vector3 {
+    const hL = this.getGroundAndBridgeHeightAt(localX - sampleStep, localZ);
+    const hR = this.getGroundAndBridgeHeightAt(localX + sampleStep, localZ);
+    const hD = this.getGroundAndBridgeHeightAt(localX, localZ - sampleStep);
+    const hU = this.getGroundAndBridgeHeightAt(localX, localZ + sampleStep);
+    const nx = hL - hR;
+    const ny = 2 * sampleStep;
+    const nz = hD - hU;
+    return new THREE.Vector3(nx, ny, nz).normalize();
+  }
+
+  /**
+   * Returns static colliders for all currently active streamed chunks in local scene coordinates.
+   */
+  public getActiveChunkStaticColliders(): StaticCollider[] {
+    if (!this.collidersDirty) {
+      return this.cachedLocalChunkColliders;
+    }
+    const list: StaticCollider[] = [];
+    const ox = this.accumulatedOffset.x;
+    const oz = this.accumulatedOffset.z;
+    for (const entry of this.chunks.values()) {
+      for (let i = 0; i < entry.worldStaticColliders.length; i++) {
+        const wc = entry.worldStaticColliders[i];
+        list.push({
+          ...wc,
+          x: wc.x - ox,
+          z: wc.z - oz,
+        });
+      }
+    }
+    this.cachedLocalChunkColliders = list;
+    this.collidersDirty = false;
+    return list;
+  }
+
+  private updateStreamedWaterGeometry(centerWorldX: number) {
+    if (!this.waterMesh) return;
+    if (
+      Number.isFinite(this.lastWaterCenterWorldX) &&
+      Math.abs(centerWorldX - this.lastWaterCenterWorldX) < this.chunkSize * 0.5
+    ) {
+      return;
+    }
+    this.lastWaterCenterWorldX = centerWorldX;
+
+    const spanX = (this.gridRadius * 2 + 1) * this.chunkSize + 40; // 440m spans full 5x5 grid with margin
+    const riverWidth = 20;
+    const segsX = 128;
+    const segsZ = 16;
+
+    const oldGeo = this.waterMesh.geometry;
+    const waterGeo = new THREE.PlaneGeometry(spanX, riverWidth, segsX, segsZ);
+    waterGeo.rotateX(-Math.PI / 2);
+    const pos = waterGeo.attributes.position as THREE.BufferAttribute;
+    const ox = this.accumulatedOffset.x;
+    const oz = this.accumulatedOffset.z;
+    for (let i = 0; i < pos.count; i++) {
+      const worldX = centerWorldX + pos.getX(i);
+      const wzOffset = pos.getZ(i);
+      const worldZ = evaluateRiverCenterlineZ(worldX) + wzOffset;
+      pos.setX(i, worldX - ox);
+      pos.setZ(i, worldZ - oz);
+    }
+    waterGeo.computeVertexNormals();
+    this.waterMesh.geometry = waterGeo;
+    if (oldGeo) oldGeo.dispose();
+  }
+
+  private syncRegisteredBridgeVisualTransforms() {
+    const ox = this.accumulatedOffset.x;
+    const oz = this.accumulatedOffset.z;
+    for (const b of this.registeredBridges) {
+      if (b.group) {
+        b.group.position.set(b.worldX - ox, 0, b.worldZ - oz);
+      }
+    }
   }
 
   public initWaterAndBridges(scene: THREE.Scene, normalMap: THREE.Texture, bumpMap: THREE.Texture) {
@@ -514,23 +649,29 @@ export class InfiniteOpenWorldCDLODManager {
       this.waterMaterial = createShallowWaterWaveMaterial(0x164e63);
     }
     if (!this.waterMesh) {
-      const waterGeo = new THREE.PlaneGeometry(420, 20, 128, 16);
-      waterGeo.rotateX(-Math.PI / 2);
-      const pos = waterGeo.attributes.position as THREE.BufferAttribute;
-      for (let i = 0; i < pos.count; i++) {
-        const wx = pos.getX(i);
-        const wzOffset = pos.getZ(i);
-        pos.setZ(i, evaluateRiverCenterlineZ(wx) + wzOffset);
-      }
-      waterGeo.computeVertexNormals();
-      this.waterMesh = new THREE.Mesh(waterGeo, this.waterMaterial);
+      const placeholderGeo = new THREE.PlaneGeometry(1, 1);
+      this.waterMesh = new THREE.Mesh(placeholderGeo, this.waterMaterial);
       this.waterMesh.position.y = -0.32;
       this.chunkGroup.add(this.waterMesh);
+      this.lastWaterCenterWorldX = Number.NaN;
+      this.updateStreamedWaterGeometry(this.accumulatedOffset.x);
     }
 
+    // Dispose previous bridge visuals cleanly and reset registry
     while (this.bridgeGroup.children.length > 0) {
-      this.bridgeGroup.remove(this.bridgeGroup.children[0]);
+      const child = this.bridgeGroup.children[0];
+      this.bridgeGroup.remove(child);
+      child.traverse((obj) => {
+        const m = obj as THREE.Mesh;
+        if (m.geometry) m.geometry.dispose();
+        if (m.material) {
+          const mats = Array.isArray(m.material) ? m.material : [m.material];
+          mats.forEach((mat) => mat.dispose());
+        }
+      });
     }
+    this.registeredBridges.length = 0;
+
     const lacquerRed = new THREE.MeshStandardMaterial({
       color: 0x991b1b,
       roughness: 0.35,
@@ -550,9 +691,14 @@ export class InfiniteOpenWorldCDLODManager {
       bumpScale: 0.03,
     });
 
-    const bridgeRiverZ = evaluateRiverCenterlineZ(0);
+    const bridgeWorldX = 0;
+    const bridgeRiverZ = evaluateRiverCenterlineZ(bridgeWorldX);
     const plankCount = 22;
     const bridgeLength = 18.0;
+    const bridgeHalfLen = bridgeLength * 0.5;
+    const singleBridgeGroup = new THREE.Group();
+    const planks: THREE.Mesh[] = [];
+
     for (let p = 0; p < plankCount; p++) {
       const u = p / (plankCount - 1);
       const zLocal = (u - 0.5) * bridgeLength;
@@ -574,23 +720,39 @@ export class InfiniteOpenWorldCDLODManager {
       });
       plankGeo.center();
       const plankMesh = new THREE.Mesh(plankGeo, p % 2 === 0 ? timberDark : lacquerRed);
-      plankMesh.position.set(0, yArch, bridgeRiverZ + zLocal);
+      plankMesh.position.set(0, yArch, zLocal);
       plankMesh.userData.uNorm = u;
-      this.bridgeGroup.add(plankMesh);
+      singleBridgeGroup.add(plankMesh);
+      planks.push(plankMesh);
     }
 
     for (const sideX of [-1.85, 1.85]) {
       const pts: THREE.Vector3[] = [];
       for (let s = 0; s <= 24; s++) {
         const u = s / 24;
-        const z = bridgeRiverZ + (u - 0.5) * bridgeLength;
-        const y = evaluateCatenaryBridgeHeight(u, 0.95, 2.15, null) + Math.cosh((u - 0.5) * 2.2) * 0.25;
+        const z = (u - 0.5) * bridgeLength;
+        const y =
+          evaluateCatenaryBridgeHeight(u, 0.95, 2.15, null) + Math.cosh((u - 0.5) * 2.2) * 0.25;
         pts.push(new THREE.Vector3(sideX, y, z));
       }
       const curve = new THREE.CatmullRomCurve3(pts);
       const ropeGeo = new THREE.TubeGeometry(curve, 32, 0.045, 8, false);
-      this.bridgeGroup.add(new THREE.Mesh(ropeGeo, lacquerRed));
+      singleBridgeGroup.add(new THREE.Mesh(ropeGeo, lacquerRed));
     }
+
+    this.bridgeGroup.add(singleBridgeGroup);
+    this.registerBridge({
+      id: 'taiko_bashi_origin',
+      worldX: bridgeWorldX,
+      worldZ: bridgeRiverZ,
+      halfWidth: 2.15,
+      halfLength: bridgeHalfLen,
+      baseY: 0.1,
+      archHeight: 2.15,
+      group: singleBridgeGroup,
+      planks,
+    });
+    this.syncRegisteredBridgeVisualTransforms();
 
     this.chunkGroup.add(this.bridgeGroup);
     if (!this.chunkGroup.parent) {
@@ -624,6 +786,9 @@ export class InfiniteOpenWorldCDLODManager {
       playerPos.sub(shiftDelta);
       this.shiftCount++;
       this.lastCenterChunkX = 99999;
+      this.lastWaterCenterWorldX = Number.NaN;
+      this.collidersDirty = true;
+      this.syncRegisteredBridgeVisualTransforms();
       if (onOriginShift) {
         onOriginShift(shiftDelta);
       }
@@ -639,6 +804,8 @@ export class InfiniteOpenWorldCDLODManager {
       this.lastCenterChunkX = centerCX;
       this.lastCenterChunkZ = centerCZ;
       this.rebuildConcentricChunks(centerCX, centerCZ, normalMap, bumpMap, onChunkGenerated);
+      this.updateStreamedWaterGeometry(centerCX * this.chunkSize + this.accumulatedOffset.x);
+      this.collidersDirty = true;
     }
 
     // Update Shallow-Water Shader Uniforms
@@ -647,29 +814,30 @@ export class InfiniteOpenWorldCDLODManager {
       this.waterMaterial.uniforms.uPlayerWorldPos.value.copy(playerPos);
     }
 
-    const riverZ = evaluateRiverCenterlineZ(trueWorldX);
-    const bridgeHalfLen = 9.0;
-    const onBridge =
-      Math.abs(playerPos.x) <= 2.15 && Math.abs(playerPos.z - riverZ) <= bridgeHalfLen;
-    const playerBridgeU = onBridge
-      ? (playerPos.z - (riverZ - bridgeHalfLen)) / (bridgeHalfLen * 2)
-      : null;
+    // Single Source of Truth bridge check using true world coordinates
+    const activeBridgeHit = this.findRegisteredBridgeAtWorld(trueWorldX, trueWorldZ);
+    const onBridge = activeBridgeHit !== null;
 
-    for (const child of this.bridgeGroup.children) {
-      if (typeof child.userData.uNorm === 'number') {
-        child.position.y = evaluateCatenaryBridgeHeight(
-          child.userData.uNorm,
-          0.1,
-          2.15,
-          playerBridgeU
-        );
+    for (const b of this.registeredBridges) {
+      if (!b.planks) continue;
+      const loadU = activeBridgeHit && activeBridgeHit.bridge.id === b.id ? activeBridgeHit.uNorm : null;
+      for (const plank of b.planks) {
+        if (typeof plank.userData.uNorm === 'number') {
+          plank.position.y = evaluateCatenaryBridgeHeight(
+            plank.userData.uNorm,
+            b.baseY,
+            b.archHeight,
+            loadU
+          );
+        }
       }
     }
 
+    const riverZ = evaluateRiverCenterlineZ(trueWorldX);
     const terrainY = evaluateMultifractalTerrainHeight(trueWorldX, trueWorldZ);
     const currentBiome = classifyOpenWorldBiome(trueWorldX, trueWorldZ, terrainY);
     const caveSdf = evaluateCaveWormTunnelSDF(trueWorldX, playerPos.y, trueWorldZ);
-    const inWater = !onBridge && Math.abs(playerPos.z - riverZ) < 6.8 && terrainY < 0.25;
+    const inWater = !onBridge && Math.abs(trueWorldZ - riverZ) < 6.8 && terrainY < 0.25;
 
     if (this.waterMaterial) {
       this.waterMaterial.uniforms.uRippleStrength.value = inWater ? 1.0 : 0.15;
@@ -837,11 +1005,13 @@ export class InfiniteOpenWorldCDLODManager {
     mesh.receiveShadow = true;
 
     // ========================================================================
-    // PER-CHUNK BOTANICAL & ARCHITECTURAL POPULATION (ZERO CONES OR CYLINDERS)
+    // PER-CHUNK BOTANICAL & ARCHITECTURAL POPULATION + REAL STATIC COLLIDERS
     // ========================================================================
     const propGroup = new THREE.Group();
     propGroup.position.set(cx * this.chunkSize, 0, cz * this.chunkSize);
     const disposableMaterials: THREE.Material[] = [];
+    const worldStaticColliders: StaticCollider[] = [];
+    const chunkKey = `${cx}:${cz}`;
 
     const grassMat = new THREE.MeshStandardMaterial({
       color: dominantBiome.foliageHex,
@@ -951,6 +1121,16 @@ export class InfiniteOpenWorldCDLODManager {
           canopy.scale.set(1.6, 1.1, 1.6);
           propGroup.add(canopy);
         }
+        worldStaticColliders.push({
+          id: `${chunkKey}_bamboo_${t}`,
+          kind: 'cylinder',
+          x: wx,
+          z: wz,
+          minY: gy - 0.5,
+          maxY: gy + 7.5,
+          radius: 0.55,
+          tag: 'bamboo',
+        });
       } else if (this.sharedTreeTrunkGeo && this.sharedCanopyPadGeo) {
         const treeGrp = new THREE.Group();
         treeGrp.position.set(lx, gy, lz);
@@ -974,6 +1154,16 @@ export class InfiniteOpenWorldCDLODManager {
           treeGrp.add(pad);
         }
         propGroup.add(treeGrp);
+        worldStaticColliders.push({
+          id: `${chunkKey}_tree_${t}`,
+          kind: 'cylinder',
+          x: wx,
+          z: wz,
+          minY: gy - 0.5,
+          maxY: gy + 5.6 * sc,
+          radius: 0.42 * sc,
+          tag: 'tree',
+        });
       }
     }
 
@@ -989,13 +1179,27 @@ export class InfiniteOpenWorldCDLODManager {
         if (Math.hypot(wx, wz) < 14.0 || Math.abs(wz - evaluateRiverCenterlineZ(wx)) < 8.0) continue;
         const ry = evaluateMultifractalTerrainHeight(wx, wz);
 
+        const sx = 0.9 + rh1 * 1.1;
+        const sy = 0.7 + rh2 * 0.8;
+        const sz = 0.9 + rh2 * 1.1;
         const boulder = new THREE.Mesh(this.sharedBoulderGeo, stoneMat);
         boulder.position.set(rx, ry, rz);
-        boulder.scale.set(0.9 + rh1 * 1.1, 0.7 + rh2 * 0.8, 0.9 + rh2 * 1.1);
+        boulder.scale.set(sx, sy, sz);
         boulder.rotation.set(rh1 * 0.4, rh2 * Math.PI * 2, rh2 * 0.4);
         boulder.castShadow = true;
         boulder.receiveShadow = true;
         propGroup.add(boulder);
+
+        worldStaticColliders.push({
+          id: `${chunkKey}_boulder_${r}`,
+          kind: 'cylinder',
+          x: wx,
+          z: wz,
+          minY: ry - 0.5,
+          maxY: ry + 0.98 * sy,
+          radius: 0.92 * Math.max(sx, sz),
+          tag: 'boulder',
+        });
       }
 
       // Deterministic Sacred Torii Gate & Stone Lantern Landmark per outer chunk
@@ -1007,9 +1211,10 @@ export class InfiniteOpenWorldCDLODManager {
         const wz = chunkWorldCenterZ + lz;
         if (Math.abs(wz - evaluateRiverCenterlineZ(wx)) > 9.5) {
           const ly = evaluateMultifractalTerrainHeight(wx, wz);
+          const rotY = lh1 * Math.PI;
           const toriiGrp = new THREE.Group();
           toriiGrp.position.set(lx, ly, lz);
-          toriiGrp.rotation.y = lh1 * Math.PI;
+          toriiGrp.rotation.y = rotY;
 
           const pL = new THREE.Mesh(this.sharedToriiPillarGeo, lacquerToriiMat);
           pL.position.set(-2.5, 0, 0);
@@ -1027,18 +1232,44 @@ export class InfiniteOpenWorldCDLODManager {
           toriiGrp.add(lantern);
 
           propGroup.add(toriiGrp);
+
+          // Rotate pillar and lantern offsets into true world space for exact static collision
+          const cosY = Math.cos(rotY);
+          const sinY = Math.sin(rotY);
+          const toriiColliderSpecs: Array<
+            ['torii_pillar' | 'lantern', number, number, number, number]
+          > = [
+            ['torii_pillar', -2.5, 0, 0.32, 6.2],
+            ['torii_pillar', 2.5, 0, 0.32, 6.2],
+            ['lantern', 3.8, 1.4, 0.42, 2.28],
+          ];
+          for (const [tag, px, pz, rad, height] of toriiColliderSpecs) {
+            const worldOffX = px * cosY + pz * sinY;
+            const worldOffZ = -px * sinY + pz * cosY;
+            worldStaticColliders.push({
+              id: `${chunkKey}_${tag}_${px}_${pz}`,
+              kind: 'cylinder',
+              x: wx + worldOffX,
+              z: wz + worldOffZ,
+              minY: ly - 0.5,
+              maxY: ly + height,
+              radius: rad,
+              tag,
+            });
+          }
         }
       }
     }
 
     return {
-      key: `${cx}:${cz}`,
+      key: chunkKey,
       chunkX: cx,
       chunkZ: cz,
       lodLevel,
       mesh,
       propGroup,
       disposableMaterials,
+      worldStaticColliders,
       dominantBiome,
     };
   }

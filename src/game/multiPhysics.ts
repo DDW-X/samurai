@@ -459,7 +459,251 @@ export function sliceBufferGeometryByPlane(
 }
 
 /**
- * 5. Real 60Hz Rigid-Body & Articulated Ragdoll Physics Engine (cannon-es)
+ * 5. Fixed-Timestep Accumulator (60Hz Deterministic Simulation Loop)
+ */
+export interface FixedStepResult {
+  steps: number;
+  alpha: number;
+}
+
+export class FixedTimestepStepper {
+  public readonly fixedDt: number;
+  public readonly maxFrameDelta: number;
+  public readonly maxSubsteps: number;
+  public accumulator = 0;
+
+  constructor(fixedDt = 1 / 60, maxFrameDelta = 0.05, maxSubsteps = 4) {
+    this.fixedDt = fixedDt;
+    this.maxFrameDelta = maxFrameDelta;
+    this.maxSubsteps = maxSubsteps;
+  }
+
+  public advance(
+    rawDt: number,
+    stepFn: (fixedDt: number, stepIndex: number) => void
+  ): FixedStepResult {
+    const clampedDt = Number.isFinite(rawDt)
+      ? Math.min(Math.max(rawDt, 0), this.maxFrameDelta)
+      : 0;
+    this.accumulator += clampedDt;
+    let steps = 0;
+    while (this.accumulator >= this.fixedDt && steps < this.maxSubsteps) {
+      stepFn(this.fixedDt, steps);
+      this.accumulator -= this.fixedDt;
+      steps++;
+    }
+    const maxAccum = this.fixedDt * this.maxSubsteps;
+    if (this.accumulator > maxAccum) {
+      this.accumulator = maxAccum;
+    }
+    return { steps, alpha: this.accumulator / this.fixedDt };
+  }
+
+  public reset(): void {
+    this.accumulator = 0;
+  }
+}
+
+/**
+ * 6. Real 3D Capsule-vs-Capsule & Capsule-vs-StaticCollider Solvers (Wall-Sliding)
+ */
+export interface ActorCapsule {
+  x: number;
+  y: number; // feet elevation
+  z: number;
+  radius: number;
+  height: number;
+}
+
+export interface StaticCollider {
+  id: string;
+  kind: 'cylinder' | 'box';
+  x: number;
+  z: number;
+  minY: number;
+  maxY: number;
+  radius?: number;
+  halfX?: number;
+  halfZ?: number;
+  tag: 'torii_pillar' | 'lantern' | 'boulder' | 'tree' | 'bamboo' | 'crate' | 'wall';
+}
+
+export function resolveCapsuleVsCapsuleSeparation(
+  a: ActorCapsule,
+  b: ActorCapsule,
+  aWeight = 0.5,
+  bWeight = 0.5
+): boolean {
+  // Check 3D vertical capsule overlap
+  if (a.y >= b.y + b.height || b.y >= a.y + a.height) {
+    return false;
+  }
+  const dx = b.x - a.x;
+  const dz = b.z - a.z;
+  const distSq = dx * dx + dz * dz;
+  const minDist = a.radius + b.radius;
+  if (distSq >= minDist * minDist) {
+    return false;
+  }
+
+  const dist = Math.sqrt(distSq);
+  const nx = dist > 1e-5 ? dx / dist : 1;
+  const nz = dist > 1e-5 ? dz / dist : 0;
+  const penetration = minDist - dist;
+  const totalW = Math.max(1e-5, aWeight + bWeight);
+  const wa = aWeight / totalW;
+  const wb = bWeight / totalW;
+
+  a.x -= nx * penetration * wa;
+  a.z -= nz * penetration * wa;
+  b.x += nx * penetration * wb;
+  b.z += nz * penetration * wb;
+  return true;
+}
+
+export function resolveCapsuleVsStaticColliders(
+  capsule: ActorCapsule,
+  colliders: readonly StaticCollider[]
+): { collided: boolean; normalX: number; normalZ: number } {
+  let collided = false;
+  let lastNX = 0;
+  let lastNZ = 0;
+
+  // 2 relaxation passes cleanly handle acute corners between adjacent props
+  for (let pass = 0; pass < 2; pass++) {
+    let passHit = false;
+    for (let i = 0; i < colliders.length; i++) {
+      const c = colliders[i];
+      // Vertical overlap with 0.15m step clearance
+      if (capsule.y + 0.15 >= c.maxY || capsule.y + capsule.height <= c.minY) {
+        continue;
+      }
+
+      if (c.kind === 'cylinder') {
+        const cRadius = c.radius ?? 0.35;
+        const dx = capsule.x - c.x;
+        const dz = capsule.z - c.z;
+        const minDist = capsule.radius + cRadius;
+        const distSq = dx * dx + dz * dz;
+        if (distSq < minDist * minDist) {
+          const dist = Math.sqrt(distSq);
+          const nx = dist > 1e-5 ? dx / dist : 1;
+          const nz = dist > 1e-5 ? dz / dist : 0;
+          const push = minDist - dist;
+          capsule.x += nx * push;
+          capsule.z += nz * push;
+          collided = true;
+          passHit = true;
+          lastNX = nx;
+          lastNZ = nz;
+        }
+      } else {
+        const hx = c.halfX ?? 0.45;
+        const hz = c.halfZ ?? 0.45;
+        const closestX = Math.max(c.x - hx, Math.min(c.x + hx, capsule.x));
+        const closestZ = Math.max(c.z - hz, Math.min(c.z + hz, capsule.z));
+        const dx = capsule.x - closestX;
+        const dz = capsule.z - closestZ;
+        const distSq = dx * dx + dz * dz;
+
+        if (distSq < capsule.radius * capsule.radius) {
+          if (distSq > 1e-8) {
+            const dist = Math.sqrt(distSq);
+            const nx = dx / dist;
+            const nz = dz / dist;
+            const push = capsule.radius - dist;
+            capsule.x += nx * push;
+            capsule.z += nz * push;
+            lastNX = nx;
+            lastNZ = nz;
+          } else {
+            // Center inside AABB: push out along minimum penetration axis
+            const penX = hx + capsule.radius - Math.abs(capsule.x - c.x);
+            const penZ = hz + capsule.radius - Math.abs(capsule.z - c.z);
+            if (penX < penZ) {
+              const signX = capsule.x >= c.x ? 1 : -1;
+              capsule.x += signX * penX;
+              lastNX = signX;
+              lastNZ = 0;
+            } else {
+              const signZ = capsule.z >= c.z ? 1 : -1;
+              capsule.z += signZ * penZ;
+              lastNX = 0;
+              lastNZ = signZ;
+            }
+          }
+          collided = true;
+          passHit = true;
+        }
+      }
+    }
+    if (!passHit) break;
+  }
+
+  return { collided, normalX: lastNX, normalZ: lastNZ };
+}
+
+/**
+ * Checks whether an actual vertical static collider (Torii pillar, boulder, tree, wall, crate)
+ * is within `maxDist` (default 1.6m) of the actor for a physically grounded Wall-Vault.
+ */
+export function findNearbyWallVaultObstacle(
+  capsule: ActorCapsule,
+  forwardX: number,
+  forwardZ: number,
+  colliders: readonly StaticCollider[],
+  maxDist = 1.6
+): StaticCollider | null {
+  const fLen = Math.hypot(forwardX, forwardZ);
+  const fx = fLen > 1e-5 ? forwardX / fLen : 0;
+  const fz = fLen > 1e-5 ? forwardZ / fLen : 1;
+
+  let best: StaticCollider | null = null;
+  let bestDist = Infinity;
+
+  for (let i = 0; i < colliders.length; i++) {
+    const c = colliders[i];
+    // Obstacle must have meaningful vertical height (>= 1.0m tall) and overlap actor jump height
+    if (c.maxY - c.minY < 1.0) continue;
+    if (c.maxY < capsule.y + 0.7 || c.minY > capsule.y + 1.4) continue;
+
+    let surfaceDist = Infinity;
+    let toObsX = c.x - capsule.x;
+    let toObsZ = c.z - capsule.z;
+
+    if (c.kind === 'cylinder') {
+      const centerDist = Math.hypot(toObsX, toObsZ);
+      surfaceDist = Math.max(0, centerDist - (c.radius ?? 0.35) - capsule.radius);
+    } else {
+      const hx = c.halfX ?? 0.45;
+      const hz = c.halfZ ?? 0.45;
+      const closestX = Math.max(c.x - hx, Math.min(c.x + hx, capsule.x));
+      const closestZ = Math.max(c.z - hz, Math.min(c.z + hz, capsule.z));
+      toObsX = closestX - capsule.x;
+      toObsZ = closestZ - capsule.z;
+      surfaceDist = Math.max(0, Math.hypot(toObsX, toObsZ) - capsule.radius);
+    }
+
+    if (surfaceDist > maxDist) continue;
+
+    // Require obstacle to be adjacent (<= 0.55m) or generally in front of movement/facing
+    const dirLen = Math.hypot(toObsX, toObsZ);
+    const dot = dirLen > 1e-5 ? (toObsX / dirLen) * fx + (toObsZ / dirLen) * fz : 1;
+    if (surfaceDist > 0.55 && dot < -0.2) continue;
+
+    if (surfaceDist < bestDist) {
+      bestDist = surfaceDist;
+      best = c;
+    }
+  }
+
+  return best;
+}
+
+/**
+ * 7. Real 60Hz Rigid-Body & Articulated Ragdoll Physics Engine (cannon-es)
+ *    Synchronizes rigid body ground contacts against the real 3D terrain & bridge heightfield
+ *    (zero hardcoded y = 0 flat plane assumptions).
  */
 export interface SyncedRigidBodyEntry {
   id: number;
@@ -467,9 +711,23 @@ export interface SyncedRigidBodyEntry {
   mesh: THREE.Object3D;
   life: number;
   maxLife: number;
+  groundClearance: number;
   isDestructibleProp: boolean;
   propType?: 'crate' | 'lantern' | 'sliced_half' | 'ragdoll_limb';
   hp?: number;
+}
+
+function estimateShapeGroundClearance(shape: CANNON.Shape): number {
+  if (shape instanceof CANNON.Sphere) {
+    return Math.max(0.1, shape.radius);
+  }
+  if (shape instanceof CANNON.Box) {
+    return Math.max(0.1, shape.halfExtents.y);
+  }
+  if (shape instanceof CANNON.Cylinder) {
+    return Math.max(0.1, shape.height * 0.5);
+  }
+  return 0.25;
 }
 
 export class CannonMultiPhysicsEngine {
@@ -484,14 +742,8 @@ export class CannonMultiPhysicsEngine {
     });
     this.world.broadphase = new CANNON.SAPBroadphase(this.world);
     this.world.allowSleep = true;
-
-    // Static ground plane at y = 0
-    const groundBody = new CANNON.Body({
-      type: CANNON.Body.STATIC,
-      shape: new CANNON.Plane(),
-    });
-    groundBody.quaternion.setFromEuler(-Math.PI / 2, 0, 0);
-    this.world.addBody(groundBody);
+    // Terrain & bridge contacts are dynamically resolved against sampleGroundHeight(x, z)
+    // so bodies collide accurately on hills (y > 0) AND valleys (y < 0).
   }
 
   public addRigidBodyMesh(
@@ -506,10 +758,15 @@ export class CannonMultiPhysicsEngine {
     propType: SyncedRigidBodyEntry['propType'] = 'sliced_half',
     hp = 45
   ): SyncedRigidBodyEntry {
+    const safeY = Number.isFinite(pos.y) ? pos.y : 0.25;
     const body = new CANNON.Body({
       mass,
       shape,
-      position: new CANNON.Vec3(pos.x, Math.max(0.25, pos.y), pos.z),
+      position: new CANNON.Vec3(
+        Number.isFinite(pos.x) ? pos.x : 0,
+        safeY,
+        Number.isFinite(pos.z) ? pos.z : 0
+      ),
       linearDamping: 0.18,
       angularDamping: 0.24,
     });
@@ -525,6 +782,7 @@ export class CannonMultiPhysicsEngine {
       mesh,
       life,
       maxLife: life,
+      groundClearance: estimateShapeGroundClearance(shape),
       isDestructibleProp,
       propType,
       hp,
@@ -617,15 +875,52 @@ export class CannonMultiPhysicsEngine {
     }
   }
 
-  public step(dt: number, scene: THREE.Scene) {
-    this.world.step(1 / 60, Math.min(dt, 0.05), 3);
+  public shiftAllBodies(shiftDelta: { x: number; y: number; z: number }) {
+    for (const entry of this.entries) {
+      entry.body.position.x -= shiftDelta.x;
+      entry.body.position.y -= shiftDelta.y;
+      entry.body.position.z -= shiftDelta.z;
+      entry.mesh.position.set(
+        entry.body.position.x,
+        entry.body.position.y,
+        entry.body.position.z
+      );
+    }
+  }
+
+  public step(
+    dt: number,
+    scene: THREE.Scene,
+    sampleGroundHeight?: (x: number, z: number) => number
+  ) {
+    const safeDt = Number.isFinite(dt) ? Math.min(Math.max(dt, 0), 0.05) : 1 / 60;
+    this.world.step(1 / 60, safeDt, 3);
 
     for (let i = this.entries.length - 1; i >= 0; i--) {
       const e = this.entries[i];
       if (!e.isDestructibleProp) {
-        e.life -= dt;
+        e.life -= safeDt;
       }
-      sanitizeRigidBodyState(e.body, 80, 0.25);
+
+      const groundY = sampleGroundHeight
+        ? sampleGroundHeight(e.body.position.x, e.body.position.z)
+        : 0;
+      const minCenterY = groundY + e.groundClearance;
+
+      sanitizeRigidBodyState(e.body, 80, minCenterY);
+
+      // Terrain & bridge heightfield contact resolution (supports hills > 0 and valleys < 0)
+      if (e.body.position.y < minCenterY) {
+        e.body.position.y = minCenterY;
+        if (e.body.velocity.y < 0) {
+          e.body.velocity.y =
+            Math.abs(e.body.velocity.y) < 0.85 ? 0 : -e.body.velocity.y * 0.25;
+        }
+        e.body.velocity.x *= 0.82;
+        e.body.velocity.z *= 0.82;
+        e.body.angularVelocity.scale(0.84, e.body.angularVelocity);
+      }
+
       e.mesh.position.set(e.body.position.x, e.body.position.y, e.body.position.z);
       e.mesh.quaternion.set(
         e.body.quaternion.x,
@@ -659,7 +954,7 @@ export class CannonMultiPhysicsEngine {
 }
 
 /**
- * 6. Zero-Bug Defensive Physics Sanitizer (NaN / Infinity & Velocity Clamping)
+ * 8. Zero-Bug Defensive Physics Sanitizer (NaN / Infinity & Velocity Clamping)
  *    Guarantees no rigid body, cloth vertex, or actor ever explodes to NaN/Infinity.
  */
 export function sanitizePhysicsVec3(

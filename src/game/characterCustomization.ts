@@ -311,9 +311,12 @@ export function stepPendulumGrapple(
   damping = 0.18
 ): { theta: number; omega: number; nextTheta: number; nextOmega: number } {
   const safeL = Math.max(2.0, ropeLength);
-  const alpha = -(gravity / safeL) * Math.sin(theta) - damping * omega;
-  const nextOmega = omega + alpha * dt;
-  const nextTheta = theta + nextOmega * dt;
+  const safeDt = Number.isFinite(dt) ? Math.min(Math.max(dt, 0), 0.05) : 0;
+  const safeTheta = Number.isFinite(theta) ? theta : 0;
+  const safeOmega = Number.isFinite(omega) ? omega : 0;
+  const alpha = -(gravity / safeL) * Math.sin(safeTheta) - damping * safeOmega;
+  const nextOmega = safeOmega + alpha * safeDt;
+  const nextTheta = safeTheta + nextOmega * safeDt;
   return { theta: nextTheta, omega: nextOmega, nextTheta, nextOmega };
 }
 

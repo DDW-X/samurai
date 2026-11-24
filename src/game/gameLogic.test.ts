@@ -426,5 +426,199 @@ test('Interactive Combo Dojo 7-Lesson Curriculum, Frame-Window Timing Bar, and P
   );
 });
 
+import * as CANNON from 'cannon-es';
+import {
+  FixedTimestepStepper,
+  resolveCapsuleVsCapsuleSeparation,
+  resolveCapsuleVsStaticColliders,
+  findNearbyWallVaultObstacle,
+  CannonMultiPhysicsEngine,
+  type ActorCapsule,
+  type StaticCollider,
+} from './multiPhysics';
+import { evaluateRiverCenterlineZ } from './openWorldEngine';
+
+test('Phase 1.1: FixedTimestepStepper clamps rawDt <= 0.05s, caps substeps <= 4, and guards NaN/negative deltas', () => {
+  const stepper = new FixedTimestepStepper(1 / 60, 0.05, 4);
+
+  // Huge lag spike (0.5s) must clamp to 0.05s -> 3 fixed steps of 1/60s (0.05 / (1/60) = 3)
+  let stepCount = 0;
+  const spikeRes = stepper.advance(0.5, (dt) => {
+    assert.ok(Math.abs(dt - 1 / 60) < 1e-6, 'Each substep must receive exact FIXED_DT');
+    stepCount++;
+  });
+  assert.equal(spikeRes.steps, 3, '0.5s frame clamped to 0.05s runs exactly 3 fixed 60Hz substeps');
+  assert.equal(stepCount, 3);
+  assert.ok(spikeRes.steps <= 4, 'Never exceeds maxSubsteps = 4');
+
+  // NaN or negative delta must run 0 steps and never corrupt accumulator
+  const nanRes = stepper.advance(Number.NaN, () => {
+    throw new Error('NaN dt must not step');
+  });
+  assert.equal(nanRes.steps, 0);
+  const negRes = stepper.advance(-0.2, () => {
+    throw new Error('Negative dt must not step');
+  });
+  assert.equal(negRes.steps, 0);
+  assert.ok(Number.isFinite(stepper.accumulator), 'Accumulator stays finite');
+});
+
+test('Phase 1.2 & 1.5: Terrain-aware Cannon physics (hills & valleys), terrain normals, Ghost Master grounding, and Registered Bridge single source of truth', () => {
+  // 1. CannonMultiPhysicsEngine terrain heightfield contact on elevated hill (+5m) and deep valley (-3.5m)
+  const physics = new CannonMultiPhysicsEngine();
+  const scene = new THREE.Scene();
+
+  const hillMesh = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5));
+  scene.add(hillMesh);
+  const hillEntry = physics.addRigidBodyMesh(
+    hillMesh,
+    new CANNON.Box(new CANNON.Vec3(0.25, 0.25, 0.25)),
+    4,
+    { x: 0, y: 7.0, z: 0 },
+    { x: 0, y: 0, z: 0 },
+    { x: 0, y: 0, z: 0 },
+    10
+  );
+
+  for (let i = 0; i < 120; i++) {
+    physics.step(1 / 60, scene, () => 5.0);
+  }
+  assert.ok(
+    hillEntry.body.position.y >= 5.2 && hillEntry.body.position.y <= 5.45,
+    `Body dropped on +5.0m hill must rest at ~5.25m, got ${hillEntry.body.position.y}`
+  );
+
+  const valleyMesh = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.5));
+  scene.add(valleyMesh);
+  const valleyEntry = physics.addRigidBodyMesh(
+    valleyMesh,
+    new CANNON.Box(new CANNON.Vec3(0.25, 0.25, 0.25)),
+    4,
+    { x: 10, y: 1.0, z: 0 },
+    { x: 0, y: 0, z: 0 },
+    { x: 0, y: 0, z: 0 },
+    10
+  );
+
+  for (let i = 0; i < 150; i++) {
+    physics.step(1 / 60, scene, () => -3.5);
+  }
+  assert.ok(
+    valleyEntry.body.position.y < -2.5 && valleyEntry.body.position.y >= -3.3,
+    `Body dropped in -3.5m valley must fall below y=0 and rest at ~-3.25m, got ${valleyEntry.body.position.y}`
+  );
+
+  // 2. OpenWorld registered bridge single source of truth (no phantom bridges at 160m intervals)
+  const worldMgr = new InfiniteOpenWorldCDLODManager();
+  const riverZ0 = evaluateRiverCenterlineZ(0);
+  worldMgr.registerBridge({
+    id: 'test_origin_bridge',
+    worldX: 0,
+    worldZ: riverZ0,
+    halfWidth: 2.15,
+    halfLength: 9.0,
+    baseY: 0.1,
+    archHeight: 2.15,
+  });
+
+  const terrainAtOriginRiver = evaluateMultifractalTerrainHeight(0, riverZ0);
+  const heightOnRealBridge = worldMgr.getGroundAndBridgeHeightAt(0, riverZ0);
+  assert.ok(
+    heightOnRealBridge > terrainAtOriginRiver + 1.5,
+    'Registered bridge at x=0 elevates ground height above river bed'
+  );
+
+  const riverZ160 = evaluateRiverCenterlineZ(160);
+  const terrainAt160River = evaluateMultifractalTerrainHeight(160, riverZ160);
+  const heightAt160River = worldMgr.getGroundAndBridgeHeightAt(160, riverZ160);
+  assert.equal(
+    heightAt160River,
+    terrainAt160River,
+    'Unregistered river crossing at x=160 must NOT have a phantom invisible bridge'
+  );
+
+  // 3. Terrain surface normal is unit-length and points upward (+Y)
+  const normal = worldMgr.getGroundNormalAt(95, -80);
+  assert.ok(Math.abs(normal.length() - 1) < 1e-4, 'Terrain surface normal must be normalized');
+  assert.ok(normal.y > 0, 'Terrain surface normal must point upward');
+
+  // 4. Ghost Master grounds onto terrain elevation callback instead of hardcoded y = 0
+  const dojo = new InteractiveComboDojoController();
+  dojo.setTrainerOpen(true);
+  dojo.attachGhostMasterToScene(scene);
+  dojo.stepGhostMasterAndTelemetry(
+    1 / 60,
+    new THREE.Vector3(12, 4.2, -10),
+    0,
+    null,
+    1.0,
+    () => 4.25
+  );
+  assert.ok(
+    dojo.ghostRig && Math.abs(dojo.ghostRig.root.position.y - 4.25) < 1e-4,
+    'Ghost Master must ground onto sampled terrain height'
+  );
+});
+
+test('Phase 1.3 & 1.4: 3D Capsule-vs-Capsule separation, StaticCollider wall-sliding, Wall-Vault obstacle detection, and clamped Grapple ODE', () => {
+  // 1. Overlapping actor capsules separate horizontally; vertically cleared capsules do not collide
+  const a: ActorCapsule = { x: 0, y: 0, z: 0, radius: 0.45, height: 1.85 };
+  const b: ActorCapsule = { x: 0.3, y: 0, z: 0, radius: 0.45, height: 1.85 };
+  const separated = resolveCapsuleVsCapsuleSeparation(a, b, 0.5, 0.5);
+  assert.equal(separated, true, 'Overlapping horizontal capsules must separate');
+  assert.ok(Math.hypot(b.x - a.x, b.z - a.z) >= 0.899, 'Separated capsules satisfy minDist >= rA + rB');
+
+  const aerialA: ActorCapsule = { x: 0, y: 2.2, z: 0, radius: 0.45, height: 1.85 };
+  const groundB: ActorCapsule = { x: 0.1, y: 0, z: 0, radius: 0.45, height: 1.85 };
+  assert.equal(
+    resolveCapsuleVsCapsuleSeparation(aerialA, groundB, 0.5, 0.5),
+    false,
+    'Airborne capsule above enemy head must not collide horizontally'
+  );
+
+  // 2. Static collider wall-sliding for cylinders and boxes
+  const colliders: StaticCollider[] = [
+    { id: 'torii_l', kind: 'cylinder', x: 3, z: 0, minY: 0, maxY: 5, radius: 0.5, tag: 'torii_pillar' },
+    { id: 'crate_1', kind: 'box', x: -3, z: 0, minY: 0, maxY: 1.2, halfX: 0.5, halfZ: 0.5, tag: 'crate' },
+  ];
+
+  const hittingPillar: ActorCapsule = { x: 2.35, y: 0, z: 0.1, radius: 0.45, height: 1.85 };
+  const cylRes = resolveCapsuleVsStaticColliders(hittingPillar, colliders);
+  assert.equal(cylRes.collided, true, 'Capsule overlapping cylinder collider must resolve');
+  assert.ok(
+    Math.hypot(hittingPillar.x - 3, hittingPillar.z) >= 0.949,
+    'Resolved capsule stays outside cylinder radius + actor radius'
+  );
+
+  const hittingCrate: ActorCapsule = { x: -2.2, y: 0, z: 0, radius: 0.45, height: 1.85 };
+  const boxRes = resolveCapsuleVsStaticColliders(hittingCrate, colliders);
+  assert.equal(boxRes.collided, true, 'Capsule overlapping box collider must resolve');
+  assert.ok(hittingCrate.x >= -2.051, 'Resolved capsule stays outside AABB half-extent + actor radius');
+
+  // 3. Wall-vault obstacle detection: succeeds near real vertical collider, returns null in open terrain (even > 18.5m from origin)
+  const nearPillar: ActorCapsule = { x: 1.6, y: 0, z: 0, radius: 0.45, height: 1.85 };
+  const foundObs = findNearbyWallVaultObstacle(nearPillar, 1, 0, colliders, 1.6);
+  assert.equal(foundObs?.id, 'torii_l', 'Detects real vertical obstacle within 1.6m');
+
+  const openFieldFarFromOrigin: ActorCapsule = { x: 45, y: 0, z: 45, radius: 0.45, height: 1.85 };
+  const noObs = findNearbyWallVaultObstacle(openFieldFarFromOrigin, 1, 0, colliders, 1.6);
+  assert.equal(noObs, null, 'Open terrain far from obstacles must NOT falsely trigger wall-vault');
+
+  // 4. stepPendulumGrapple safely clamps huge dt spikes and NaN inputs
+  const clampedStep = stepPendulumGrapple(-0.6, 1.0, 8.0, 10.0);
+  assert.ok(
+    Number.isFinite(clampedStep.theta) &&
+      Number.isFinite(clampedStep.omega) &&
+      Math.abs(clampedStep.theta) < 1.5,
+    'stepPendulumGrapple clamps large dt safely without exploding ODE'
+  );
+  const nanStep = stepPendulumGrapple(Number.NaN, Number.POSITIVE_INFINITY, 0, Number.NaN);
+  assert.ok(
+    Number.isFinite(nanStep.theta) && Number.isFinite(nanStep.omega),
+    'stepPendulumGrapple guards non-finite inputs'
+  );
+});
+
+
 
 

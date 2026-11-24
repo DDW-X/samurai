@@ -370,44 +370,15 @@ export function downloadStandaloneSamuraiHTML() {
     return url;
   }
 
-  // Scene, Camera, Multi-Pass EffectComposer (RenderPass + UnrealBloomPass + Anisotropic Kuwahara & Sumi-e ShaderPass)
+  // Scene, Camera & 100% Crystal-Clear Native Resolution Renderer (ZERO Screen-Space UV Distortion or Kuwahara Blur!)
   const scene = new THREE.Scene();
-  const camera = new THREE.PerspectiveCamera(44, window.innerWidth / window.innerHeight, 0.5, 160);
+  const camera = new THREE.PerspectiveCamera(44, window.innerWidth / window.innerHeight, 0.15, 220);
+  scene.add(camera);
   const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   renderer.toneMapping = THREE.ACESFilmicToneMapping;
   document.getElementById('mount').appendChild(renderer.domElement);
-
-  const composer = new EffectComposer(renderer);
-  composer.addPass(new RenderPass(scene, camera));
-  composer.addPass(new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.35, 0.4, 0.86));
-  const KuwaharaSumiShader = {
-    uniforms: {
-      tDiffuse: { value: null },
-      uResolution: { value: new THREE.Vector2(window.innerWidth, window.innerHeight) }
-    },
-    vertexShader: 'varying vec2 vUv; void main() { vUv = uv; gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0); }',
-    fragmentShader: \`
-      uniform sampler2D tDiffuse;
-      uniform vec2 uResolution;
-      varying vec2 vUv;
-      float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
-      void main() {
-        vec2 tx = 1.0 / uResolution;
-        vec3 c = texture2D(tDiffuse, vUv).rgb;
-        vec3 tl = texture2D(tDiffuse, vUv + vec2(-1.0,-1.0)*tx).rgb;
-        vec3 tr = texture2D(tDiffuse, vUv + vec2( 1.0,-1.0)*tx).rgb;
-        vec3 bl = texture2D(tDiffuse, vUv + vec2(-1.0, 1.0)*tx).rgb;
-        vec3 br = texture2D(tDiffuse, vUv + vec2( 1.0, 1.0)*tx).rgb;
-        vec3 kuw = 0.2 * (c + tl + tr + bl + br);
-        float gx = -luma(tl) + luma(tr) - luma(bl) + luma(br);
-        float gy = -luma(tl) - luma(tr) + luma(bl) + luma(br);
-        float edge = smoothstep(0.12, 0.42, sqrt(gx*gx + gy*gy));
-        gl_FragColor = vec4(mix(mix(c, kuw, 0.45), vec3(0.05, 0.04, 0.03), edge * 0.85), 1.0);
-      }
-    \`
-  };
-  composer.addPass(new ShaderPass(KuwaharaSumiShader));
 
   const hemiLight = new THREE.HemisphereLight(0xe6dec8, 0x383b2e, 0.9);
   scene.add(hemiLight);
@@ -430,6 +401,15 @@ export function downloadStandaloneSamuraiHTML() {
   weaponMount.rotation.set(0.95, 0.08, 0.16);
   playerRoot.add(armorGroup, helmGroup, rightArm, leftArm, weaponMount);
   scene.add(playerRoot);
+
+  // Dedicated First-Person Viewmodel Rig (fpvRig) attached directly to camera at (0.28, -0.32, -0.65)
+  const fpvRig = new THREE.Group();
+  fpvRig.position.set(0.28, -0.32, -0.65);
+  fpvRig.visible = false;
+  const fpvWeaponMount = new THREE.Group();
+  fpvRig.add(fpvWeaponMount);
+  camera.add(fpvRig);
+
   let camModeIdx = 0;
   const CAM_MODES = ['3rd-Person RPG (Over-Shoulder)', '1st-Person Samurai FPV (2-Hand Grip)', 'Isometric Tactical (45°)'];
 
@@ -484,6 +464,7 @@ export function downloadStandaloneSamuraiHTML() {
     while (armorGroup.children.length) armorGroup.remove(armorGroup.children[0]);
     while (helmGroup.children.length) helmGroup.remove(helmGroup.children[0]);
     while (weaponMount.children.length) weaponMount.remove(weaponMount.children[0]);
+    while (fpvWeaponMount.children.length) fpvWeaponMount.remove(fpvWeaponMount.children[0]);
 
     const pMat = createSumiMaterial(curArmor.primaryColor, 0.35, 0.45);
     const skinMat = createSumiMaterial(0xe6ccb2, 0.6, 0.05);
@@ -499,6 +480,9 @@ export function downloadStandaloneSamuraiHTML() {
     addPart(helmGroup, createExtrudedBlade(0.38, 0.08, 0.02, 0.12), cMat, [0, 1.98, 0.22]);
 
     weaponMount.add(buildWeaponMesh(getActiveWeapon()));
+    const fpvWep = buildWeaponMesh(getActiveWeapon());
+    fpvWep.rotation.set(-0.28, 0.15, -0.1);
+    fpvWeaponMount.add(fpvWep);
     document.getElementById('equip-label').textContent =
       'Blade: ' + getActiveWeapon().name + ' | Do: ' + curArmor.name + ' | Kabuto: ' + curHelm.name + ' | Tool: ' + curTool.name + ' (' + toolStock + ')';
   }
@@ -814,7 +798,7 @@ export function downloadStandaloneSamuraiHTML() {
   function loop(now) {
     const dt = Math.min((now - last) / 1000, 0.05);
     last = now;
-    if (hitstop > 0) { hitstop -= dt; composer.render(); requestAnimationFrame(loop); return; }
+    if (hitstop > 0) { hitstop -= dt; renderer.render(scene, camera); requestAnimationFrame(loop); return; }
 
     physicsWorld.step(1 / 60, dt, 3);
     atkCd = Math.max(0, atkCd - dt);
@@ -847,14 +831,14 @@ export function downloadStandaloneSamuraiHTML() {
     playerRoot.rotation.y = playerYaw;
     rightArm.rotation.x = atkAnim > 0 ? -Math.PI * 0.6 + Math.sin((1 - atkAnim / 0.28) * Math.PI) * 1.6 : 0;
 
-    // Step 3D Verlet Cloth Sheet for Haori Cloak
+    // Step 3D Verlet Cloth Sheet for Haori Cloak (strictly behind back armor plane z <= -0.22m)
     const cPos = clothGeo.attributes.position;
     for (let i = clothCols + 1; i < cPos.count; i++) {
       const iz = i * 3 + 2;
       const cz = clothCurr[iz];
       const vz = (cz - clothPrev[iz]) * 0.96;
       clothPrev[iz] = cz;
-      clothCurr[iz] = cz + vz + Math.sin(now * 0.006 + i * 0.4) * 0.002 - 0.001;
+      clothCurr[iz] = Math.min(-0.02, cz + vz + Math.sin(now * 0.006 + i * 0.4) * 0.002 - 0.001);
       cPos.setZ(i, clothCurr[iz]);
     }
     cPos.needsUpdate = true;
@@ -942,25 +926,32 @@ export function downloadStandaloneSamuraiHTML() {
 
     camTrauma = Math.max(0, camTrauma - dt * 2.2);
     const sh = camTrauma * camTrauma * 0.45;
-    helmGroup.visible = camModeIdx !== 1;
+    const isFPV = camModeIdx === 1;
+    armorGroup.visible = !isFPV;
+    helmGroup.visible = !isFPV;
+    clothMesh.visible = !isFPV;
+    weaponMount.visible = !isFPV;
+    fpvRig.visible = isFPV;
+
     if (camModeIdx === 0) {
-      // Mode 1: Over-the-Shoulder 3rd-Person RPG View
+      // Mode 1: Over-the-Shoulder 3rd-Person RPG View (+0.55m right, 3.6m back)
       const fx = Math.sin(playerYaw), fz = Math.cos(playerYaw);
-      const rx = Math.cos(playerYaw), rz = -Math.sin(playerYaw);
-      camera.position.set(playerPos.x - fx * 3.45 + rx * 0.65 + (Math.random()-0.5)*sh, playerPos.y + 1.78, playerPos.z - fz * 3.45 + rz * 0.65);
-      camera.lookAt(playerPos.x + fx * 12, playerPos.y + 1.45, playerPos.z + fz * 12);
+      const rx = -Math.cos(playerYaw), rz = Math.sin(playerYaw);
+      camera.position.set(playerPos.x - fx * 3.6 + rx * 0.55 + (Math.random()-0.5)*sh, playerPos.y + 1.65, playerPos.z - fz * 3.6 + rz * 0.55);
+      camera.lookAt(playerPos.x + fx * 16, playerPos.y + 1.5, playerPos.z + fz * 16);
     } else if (camModeIdx === 1) {
-      // Mode 2: 1st-Person Samurai FPV
+      // Mode 2: 1st-Person Samurai FPV locked to (playerPos.x, playerPos.y + 1.72, playerPos.z)
       const fx = Math.sin(playerYaw), fz = Math.cos(playerYaw);
-      camera.position.set(playerPos.x + fx * 0.14, playerPos.y + 1.58, playerPos.z + fz * 0.14);
-      camera.lookAt(playerPos.x + fx * 14, playerPos.y + 1.42, playerPos.z + fz * 14);
+      camera.position.set(playerPos.x, playerPos.y + 1.72, playerPos.z);
+      camera.lookAt(playerPos.x + fx * 20, playerPos.y + 1.72, playerPos.z + fz * 20);
+      fpvWeaponMount.rotation.x = atkAnim > 0 ? -0.6 + Math.sin((1 - atkAnim / 0.28) * Math.PI) * 1.4 : 0;
     } else {
-      // Mode 3: Isometric Tactical View
-      camera.position.set(playerPos.x + (Math.random()-0.5)*sh, playerPos.y + 15.2, playerPos.z + 14.2);
-      camera.lookAt(playerPos.x, playerPos.y + 1, playerPos.z - 1.5);
+      // Mode 3: Isometric Tactical View (45° at 14m)
+      camera.position.set(playerPos.x + (Math.random()-0.5)*sh, playerPos.y + 14.5, playerPos.z + 14.0);
+      camera.lookAt(playerPos.x, playerPos.y + 1, playerPos.z - 1.2);
     }
 
-    composer.render();
+    renderer.render(scene, camera);
     requestAnimationFrame(loop);
   }
   requestAnimationFrame(loop);

@@ -421,9 +421,9 @@ export function createAnisotropicKuwaharaSumiShader() {
       tDiffuse: { value: null as THREE.Texture | null },
       uResolution: { value: new THREE.Vector2(1440, 900) },
       uTime: { value: 0 },
-      uInkStrength: { value: 0.86 },
-      uKuwaharaStrength: { value: 0.58 },
-      uWashiWarmth: { value: 0.14 },
+      uInkStrength: { value: 0.28 },
+      uKuwaharaStrength: { value: 0.0 },
+      uWashiWarmth: { value: 0.04 },
     },
     vertexShader: /* glsl */ `
       varying vec2 vUv;
@@ -445,99 +445,30 @@ export function createAnisotropicKuwaharaSumiShader() {
         return dot(c, vec3(0.299, 0.587, 0.114));
       }
 
-      float hash12(vec2 p) {
-        vec3 p3 = fract(vec3(p.xyx) * 0.1031);
-        p3 += dot(p3, p3.yzx + 33.33);
-        return fract((p3.x + p3.y) * p3.z);
-      }
-
       void main() {
+        // 100% Crystal-Clear Native Resolution Sampling (ZERO UV warping, ZERO sinusoidal distortion)
         vec2 texel = 1.0 / max(uResolution, vec2(1.0));
         vec4 centerSample = texture2D(tDiffuse, vUv);
 
-        // 1. 4-Sector Anisotropic Kuwahara Directional Variance Kernel
-        vec3 mean0 = vec3(0.0); vec3 sq0 = vec3(0.0);
-        vec3 mean1 = vec3(0.0); vec3 sq1 = vec3(0.0);
-        vec3 mean2 = vec3(0.0); vec3 sq2 = vec3(0.0);
-        vec3 mean3 = vec3(0.0); vec3 sq3 = vec3(0.0);
-
-        // Quadrant 0: Top-Left (4 taps)
-        vec3 s00 = texture2D(tDiffuse, vUv + vec2(-1.0, -1.0) * texel).rgb;
-        vec3 s01 = texture2D(tDiffuse, vUv + vec2( 0.0, -1.0) * texel).rgb;
-        vec3 s02 = texture2D(tDiffuse, vUv + vec2(-1.0,  0.0) * texel).rgb;
-        vec3 s03 = centerSample.rgb;
-        mean0 = 0.25 * (s00 + s01 + s02 + s03);
-        sq0   = 0.25 * (s00*s00 + s01*s01 + s02*s02 + s03*s03);
-
-        // Quadrant 1: Top-Right (4 taps)
-        vec3 s10 = texture2D(tDiffuse, vUv + vec2( 1.0, -1.0) * texel).rgb;
-        vec3 s11 = s01;
-        vec3 s12 = texture2D(tDiffuse, vUv + vec2( 1.0,  0.0) * texel).rgb;
-        vec3 s13 = centerSample.rgb;
-        mean1 = 0.25 * (s10 + s11 + s12 + s13);
-        sq1   = 0.25 * (s10*s10 + s11*s11 + s12*s12 + s13*s13);
-
-        // Quadrant 2: Bottom-Left (4 taps)
-        vec3 s20 = texture2D(tDiffuse, vUv + vec2(-1.0,  1.0) * texel).rgb;
-        vec3 s21 = texture2D(tDiffuse, vUv + vec2( 0.0,  1.0) * texel).rgb;
-        vec3 s22 = s02;
-        vec3 s23 = centerSample.rgb;
-        mean2 = 0.25 * (s20 + s21 + s22 + s23);
-        sq2   = 0.25 * (s20*s20 + s21*s21 + s22*s22 + s23*s23);
-
-        // Quadrant 3: Bottom-Right (4 taps)
-        vec3 s30 = texture2D(tDiffuse, vUv + vec2( 1.0,  1.0) * texel).rgb;
-        vec3 s31 = s21;
-        vec3 s32 = s12;
-        vec3 s33 = centerSample.rgb;
-        mean3 = 0.25 * (s30 + s31 + s32 + s33);
-        sq3   = 0.25 * (s30*s30 + s31*s31 + s32*s32 + s33*s33);
-
-        // Pick sector with minimum color variance (preserving sharp painterly edges)
-        vec3 var0 = abs(sq0 - mean0 * mean0);
-        vec3 var1 = abs(sq1 - mean1 * mean1);
-        vec3 var2 = abs(sq2 - mean2 * mean2);
-        vec3 var3 = abs(sq3 - mean3 * mean3);
-
-        float v0 = var0.r + var0.g + var0.b;
-        float v1 = var1.r + var1.g + var1.b;
-        float v2 = var2.r + var2.g + var2.b;
-        float v3 = var3.r + var3.g + var3.b;
-
-        vec3 kuwaharaColor = mean0;
-        float minV = v0;
-        if (v1 < minV) { minV = v1; kuwaharaColor = mean1; }
-        if (v2 < minV) { minV = v2; kuwaharaColor = mean2; }
-        if (v3 < minV) { minV = v3; kuwaharaColor = mean3; }
-
-        vec3 baseColor = mix(centerSample.rgb, kuwaharaColor, uKuwaharaStrength);
-
-        // 2. Sobel Edge Detector for Variable-Thickness Sumi-e Ink Outlines
-        float tl = getLuma(s00);
-        float tm = getLuma(s01);
-        float tr = getLuma(s10);
-        float ml = getLuma(s02);
-        float mr = getLuma(s12);
-        float bl = getLuma(s20);
-        float bm = getLuma(s21);
-        float br = getLuma(s30);
+        // Crisp 1-texel Sobel silhouette edge accent with zero blur
+        float tl = getLuma(texture2D(tDiffuse, vUv + vec2(-1.0, -1.0) * texel).rgb);
+        float tm = getLuma(texture2D(tDiffuse, vUv + vec2( 0.0, -1.0) * texel).rgb);
+        float tr = getLuma(texture2D(tDiffuse, vUv + vec2( 1.0, -1.0) * texel).rgb);
+        float ml = getLuma(texture2D(tDiffuse, vUv + vec2(-1.0,  0.0) * texel).rgb);
+        float mr = getLuma(texture2D(tDiffuse, vUv + vec2( 1.0,  0.0) * texel).rgb);
+        float bl = getLuma(texture2D(tDiffuse, vUv + vec2(-1.0,  1.0) * texel).rgb);
+        float bm = getLuma(texture2D(tDiffuse, vUv + vec2( 0.0,  1.0) * texel).rgb);
+        float br = getLuma(texture2D(tDiffuse, vUv + vec2( 1.0,  1.0) * texel).rgb);
 
         float gx = -tl - 2.0 * ml - bl + tr + 2.0 * mr + br;
         float gy = -tl - 2.0 * tm - tr + bl + 2.0 * bm + br;
         float grad = sqrt(gx * gx + gy * gy);
 
-        // Thicker Sumi-e brush lines in shadow regions, razor-thin on brightly lit steel
-        float localLuma = getLuma(baseColor);
-        float shadowThicknessBoost = mix(1.38, 0.78, smoothstep(0.15, 0.85, localLuma));
-        float brushNoise = 0.82 + 0.36 * sin(vUv.x * 190.0 + vUv.y * 150.0);
-        float inkEdge = smoothstep(0.16, 0.52, grad * shadowThicknessBoost * brushNoise) * uInkStrength;
-
-        // 3. Washi Paper Mulberry Fiber Grain
-        float fiber = (hash12(vUv * uResolution * 0.5) - 0.5) * 0.032;
-        vec3 washiTint = mix(baseColor, baseColor * vec3(1.03, 0.99, 0.92), uWashiWarmth) + fiber;
+        float inkEdge = smoothstep(0.32, 0.78, grad) * uInkStrength;
+        vec3 crispColor = mix(centerSample.rgb, centerSample.rgb * vec3(1.01, 1.0, 0.98), uWashiWarmth);
         vec3 sumiInk = vec3(0.055, 0.042, 0.035);
 
-        gl_FragColor = vec4(mix(washiTint, sumiInk, inkEdge), centerSample.a);
+        gl_FragColor = vec4(mix(crispColor, sumiInk, inkEdge), centerSample.a);
       }
     `,
   };

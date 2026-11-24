@@ -1,6 +1,0 @@
-{
-  "summary":  "Comprehensive implementation plan for upgrading Kami-no-Yaiba: Sumi-e Samurai ARPG across all three core modules (Advanced GLSL Kami-e & Sumi-e Shaders + Sobel/Laplacian Post-Processing, High-Detail Procedural 3D Weapon/Armor/Character Geometry, and Dynamic Counter-Tactic Adaptive Utility AI with Telegraph Callouts) plus the complete Standalone Single-File HTML Exporter.",
-  "updatedAt":  "2026-10-29T17:57:25.071988296Z",
-  "requestFeedback":  true,
-  "userFacing":  true
-}
